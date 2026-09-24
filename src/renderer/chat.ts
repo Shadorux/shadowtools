@@ -3170,7 +3170,7 @@ function wireGoal(save: () => Promise<void>): void {
   $('goalLoopPromptReset').addEventListener('click', async () => {
     $<HTMLTextAreaElement>('goalLoopPrompt').value = DEFAULT_GOAL_LOOP_SYSTEM_PROMPT;
     await save();
-    toast('Loop prompt restored to default');
+    toast('Automation prompt restored to default');
   });
   // The catalogue is fetched on the first press and kept afterwards: the picker closing is
   // not a reason to spend another round trip on a list that changes weekly.
