@@ -83,8 +83,8 @@ import { capabilitiesForPlatform } from './platform.js';
  */
 const DEFAULT_CONTEXT_WINDOW = 400_000;
 const DEFAULT_SESSIONS: SessionSettings = {
-  record: true,
-  retainDays: 0,
+  record: false,
+  retainDays: 30,
   advisoryTokens: DEFAULT_CONTEXT_WINDOW,
   // Derived, never typed. The Chat panel writes `limit = threshold × 4/3` on every save,
   // so a default that did not already satisfy that relation would be a state the UI cannot
@@ -111,7 +111,7 @@ const DEFAULT_COMPACTION: CompactionSettings = {
   // this number does nothing. That is what makes the advisory line usable as the trigger —
   // the crossing turn still finishes and still writes its handoff, rather than the app
   // waiting for a chat that is already over the line and compacting it on sight.
-  auto: true,
+  auto: false,
   autoTokens: DEFAULT_SESSIONS.advisoryTokens
 };
 /**
@@ -279,7 +279,7 @@ const configSchema = z.object({
   })).max(11).refine(rows => new Set(rows.map(row => row.id)).size === rows.length, 'Duplicate setup profile').optional(),
   ui: z.object({
     appearance: appearanceSchema.optional().catch(undefined),
-    autoContinue: z.boolean().optional().default(true),
+    autoContinue: z.boolean().optional().default(false),
     chatBrowser: z.enum(CHAT_BROWSERS).optional().default('chrome'),
     developerMode: z.boolean().optional(),
     finishTool: z.boolean().optional(),
@@ -315,10 +315,6 @@ const configSchema = z.object({
         .default(DEFAULT_SESSIONS.advisoryTokens),
       limitTokens: z.number().int().min(10_000).max(4_000_000).optional().default(DEFAULT_SESSIONS.limitTokens)
     })
-    // `record` and `retainDays` remain readable for old configs and wire compatibility, but
-    // they are no longer user choices. Normalizing here covers disk load, renderer saves,
-    // extension/config writers and direct updateConfig callers at one boundary.
-    .transform((sessions) => ({ ...sessions, record: true, retainDays: 0 }))
     .optional()
     .default({ ...DEFAULT_SESSIONS }),
   compaction: z
@@ -461,7 +457,7 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform, rele
     capabilities: firstLaunchCapabilities(platform, release),
     readOnly: false,
     tunnel: { kind: 'openai', tunnelId: '', desktopTunnelId: '', binaryPath: '' },
-    ui: { minimizeToTray: true, autoConnect: false, startAtLogin: false, privacyScreenshots: false, theme: 'dark', autoRefreshPlugins: false, backgroundChats: true, autoContinue: true },
+    ui: { minimizeToTray: true, autoConnect: false, startAtLogin: false, privacyScreenshots: false, theme: 'dark', autoRefreshPlugins: false, backgroundChats: true, autoContinue: false },
     sessions: { ...DEFAULT_SESSIONS },
     compaction: { ...DEFAULT_COMPACTION },
     multiAgent: { ...FIRST_LAUNCH_MULTI_AGENT },

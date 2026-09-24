@@ -748,15 +748,8 @@
               <div class="view" data-view="settings" hidden>
                 <div class="settings-heading"><h1>Agents &amp; automation</h1><p>Fine-tune your workspace and the way your agents work.</p><label class="sr-only" for="settingsSearch">Search settings</label><input id="settingsSearch" type="search" placeholder="Search settings…" /></div>
                 <p id="settingsSearchEmpty" class="muted" role="status" hidden>No settings match your search.</p>
-                <h2 class="settings-section-title">Continuation sources</h2>
+                <h2 class="settings-section-title">Planning</h2>
                 <div class="pane">
-                  <label class="setting">
-                    <span class="setting-text">
-                      <b>Automatically continue interrupted responses</b>
-                      <em>Recover unfinished answers, including in Goal. Reload after 2 minutes without progress (Pro: 10). If still generating, wait 1 more minute (Pro: 5), then stop and send. A final answer selects Goal instead of Continue. Undelivered tickets share reload intervals of 2, 5, 10 and 15 minutes.</em>
-                    </span>
-                    <input id="autoContinue" type="checkbox" />
-                  </label>
                   <select id="goalBackend" hidden><option value="chatgpt">Disabled</option></select>
                   <select id="loopBackend" hidden><option value="chatgpt">Disabled</option></select>
                   <div class="setting"><span class="setting-text"><b>Plan model</b><em>Model for ChatGPT-generated plans. Select GPT-5.6 and High below for planning.</em></span><select id="helperModel" aria-label="Plan model"></select></div>
@@ -788,14 +781,6 @@
                     <input id="allowUnattributedCalls" type="checkbox" />
                   </label>
 
-                  <label class="setting">
-                    <span class="setting-text">
-                      <b>Recover other chats’ tabs</b>
-                      <em>Restore missing or unresponsive work chats.</em>
-                    </span>
-                    <input id="recoverAgentTabs" type="checkbox" />
-                  </label>
-
                   <div id="swarmList"></div>
                   <div class="step-actions">
                     <button class="btn" id="swarmReset" type="button">Clear swarm</button>
@@ -810,6 +795,8 @@
                   </div>
                 <h2 class="settings-section-title">Browser & history</h2>
                 <div class="pane">
+                  <label class="setting"><span class="setting-text"><b>Local session recording</b><em>Save ChatGPT activity used by ShadowTools timelines and handoffs.</em></span><input id="sessionRecording" type="checkbox" /></label>
+                  <label class="setting"><span class="setting-text"><b>Keep recordings</b><em>Automatically remove closed recordings older than this many days. Use 0 to keep them until you delete them.</em></span><input id="sessionRetainDays" class="num" type="number" min="0" max="3650" step="1" /><span class="unit">days</span></label>
                   <label class="setting"><span class="setting-text"><b>ChatGPT browser</b><em>Used when the app launches a browser. Install the companion and sign in to ChatGPT in this browser's active profile. Already connected tabs stay in their browser.</em></span><select id="chatBrowser"><option value="chrome">Google Chrome / Chromium</option><option value="edge">Microsoft Edge</option><option value="brave">Brave Browser</option></select></label>
                   <label class="setting"><span class="setting-text"><b>Background chats</b><em>Keep app-created ChatGPT tabs in the background.</em></span><input id="backgroundChats" type="checkbox" /></label>
                   <label class="setting"><span class="setting-text"><b>Automatic plugin refresh</b><em>Let the companion refresh changed connector tools in ChatGPT. Off by default; manual refresh remains available in ChatGPT.</em></span><input id="autoRefreshPlugins" type="checkbox" /></label>
@@ -818,15 +805,6 @@
                   <label class="setting"><span class="setting-text"><b>Overwrite ChatGPT tool rows</b><em>Show recorded local activity in the ChatGPT page.</em></span><input id="browserOverwrite" type="checkbox" disabled /></label>
                   <label class="setting"><span class="setting-text"><b>Show durations in ChatGPT</b><em>Uses the same preference as the extension popup.</em></span><input id="browserDurations" type="checkbox" disabled /></label>
                   <div class="setting"><span class="setting-text"><b>Browser preferences</b><em id="browserPreferencesStatus" role="status">Refresh to read the browser's current preferences.</em></span><button id="browserPreferencesRefresh" class="btn" type="button">Refresh browser preferences</button></div>
-                  <div class="setting" hidden>
-                    <span class="setting-text">
-                      <b>Compact automatically</b>
-                      <em id="autoCompactHint"></em>
-                    </span>
-                    <input id="autoCompactTokens" class="num" type="number" min="10000" max="4000000" step="10000" />
-                    <span class="unit">tokens</span>
-                    <span class="sw"><input type="checkbox" id="autoCompact" /><i></i></span>
-                  </div>
                   </div>
                 <h2 class="settings-section-title">API provider</h2>
                 <div class="pane">

@@ -2881,19 +2881,17 @@ export function chatSettingsPatch(current: Config): {
     if (!Number.isFinite(raw)) return fallback;
     return Math.min(max, Math.max(min, Math.round(raw)));
   };
-  const threshold = number('autoCompactTokens', current.compaction.autoTokens, 10_000, 4_000_000);
+  const threshold = current.compaction.autoTokens;
   return {
     sessions: {
-      // Main enforces these invariants too. Keeping the canonical values in the complete
-      // renderer snapshot prevents an old/foreign control value from being proposed at all.
-      record: true,
-      retainDays: 0,
+      record: $<HTMLInputElement>('sessionRecording').checked,
+      retainDays: number('sessionRetainDays', current.sessions.retainDays, 0, 3650),
       // Both follow the single threshold above rather than being typed separately.
       advisoryTokens: threshold,
       limitTokens: urgentFrom(threshold)
     },
     compaction: {
-      auto: $<HTMLInputElement>('autoCompact').checked,
+      auto: false,
       autoTokens: threshold
     },
     multiAgent: {
@@ -2904,7 +2902,7 @@ export function chatSettingsPatch(current: Config): {
       enabled: $<HTMLInputElement>('homeMaEnabled').checked,
       maxWorkers: number('maWorkers', current.multiAgent.maxWorkers, 1, 8),
       allowUnattributedCalls: $<HTMLInputElement>('allowUnattributedCalls').checked,
-      recoverAgentTabs: $<HTMLInputElement>('recoverAgentTabs').checked
+      recoverAgentTabs: false
     },
     goal: {
       enabled: current.goal.enabled, mode: current.goal.mode,
@@ -3247,16 +3245,6 @@ function wireGoal(save: () => Promise<void>): void {
 }
 
 /**
- * One clause under the row, not a paragraph: what the switch will do, and the fact that
- * the number it fires on is this app's own estimate rather than ChatGPT's accounting.
- */
-function applyAutoCompactHint(config: Config): void {
-  ui($('autoCompactHint'), 'textContent', () => config.compaction.auto
-    ? t("Interrupts an active answer at this many tokens, writes a handoff, and opens a fresh chat.")
-    : t("Off — only the Compact & resume button in the ChatGPT tab compacts."));
-}
-
-/**
  * Every control on the settings sheet, and the whole of it.
  *
  * A field that is not here does not save: it keeps what was typed until the next repaint
@@ -3267,18 +3255,16 @@ function applyAutoCompactHint(config: Config): void {
  */
 const CHAT_INPUTS = [
   'chatBrowser',
+  'sessionRecording',
+  'sessionRetainDays',
   'goalIncludeToolCalls',
   'planBackend',
   'finishTool', 'finishLeadMinutes', 'workerModel', 'workerReasoning', 'backgroundChats', 'browserOnly', 'autoRefreshPlugins',
   'goalBackend',
   'loopBackend',
   'helperModel', 'helperReasoning',
-  'autoCompact',
-  'autoCompactTokens',
   'maWorkers',
   'allowUnattributedCalls',
-  'recoverAgentTabs',
-  'autoContinue',
   'goalProvider',
   'goalBaseUrl',
   'goalCustomModel',
@@ -3294,25 +3280,14 @@ export function chatApply(state: AppState, previous?: Config): void {
   if (visible && selectedId) void refreshSessionControls();
   paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
   applyChatModels(config, previous);
-
-  applyChatChecked($<HTMLInputElement>('autoCompact'), config.compaction.auto, previous?.compaction.auto);
-  applyChatValue(
-    $<HTMLInputElement>('autoCompactTokens'),
-    String(config.compaction.autoTokens),
-    previous?.compaction.autoTokens
-  );
-  applyAutoCompactHint(config);
+  applyChatChecked($<HTMLInputElement>('sessionRecording'), config.sessions.record, previous?.sessions.record);
+  applyChatValue($<HTMLInputElement>('sessionRetainDays'), String(config.sessions.retainDays), previous?.sessions.retainDays);
 
   applyChatValue($<HTMLInputElement>('maWorkers'), String(config.multiAgent.maxWorkers), previous?.multiAgent.maxWorkers);
   applyChatChecked(
     $<HTMLInputElement>('allowUnattributedCalls'),
     config.multiAgent.allowUnattributedCalls,
     previous?.multiAgent.allowUnattributedCalls
-  );
-  applyChatChecked(
-    $<HTMLInputElement>('recoverAgentTabs'),
-    config.multiAgent.recoverAgentTabs,
-    previous?.multiAgent.recoverAgentTabs
   );
 
   applyChatValue($<HTMLSelectElement>('workerModel'), config.multiAgent.defaultModel ?? '', previous?.multiAgent.defaultModel);

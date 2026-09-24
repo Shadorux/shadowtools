@@ -16,7 +16,7 @@ import { unifiedExecManager } from './codex/manager.js';
 import { initSecretsPath } from './secrets.js';
 import { pluginManager } from './plugins/manager.js';
 import { setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
-import { flushSessions, initSessionStore } from './session/store.js';
+import { flushSessions, initSessionStore, pruneSessions } from './session/store.js';
 import { initSkillsPath } from './skills.js';
 import { usageOverview } from './session/usage.js';
 import {
@@ -310,6 +310,11 @@ void app.whenReady().then(async () => {
   await restoreChatModels();
   if (windowActivation.isDisabled()) return;
   await loadConfig();
+  if (getConfig().sessions.record) {
+    void pruneSessions(getConfig().sessions.retainDays).catch((error: Error) =>
+      logWarn(`recording retention cleanup failed: ${error.message}`)
+    );
+  }
   await pluginManager.initialize(userData);
   if (windowActivation.isDisabled()) return;
   try { applyLoginStartup(app, getConfig().ui.startAtLogin === true); }

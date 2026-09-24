@@ -19,7 +19,6 @@ import { browserWindowBounds, currentBrowserWorkArea } from './browser-window-la
 export { setBrowserWorkArea } from './browser-window-layout.js';
 import { pendingBrowserPreferenceRequest, acknowledgeBrowserPreferences } from './browser-preferences.js';
 import { sessionFinishHeld, releaseSessionFinish, getSessionFinishDraft, sessionFinishWaiting } from './session/finish.js';
-import { observeUsage } from './session/usage.js';
 import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, fileRecoveryInput, advanceRecoveryInput, hasQueuedAfterTurnInput, inputBeforeGoal, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs } from './session/input.js';
 /**
  * The local bridge between the Chrome extension and this app.
@@ -1938,14 +1937,6 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       },
       origin
     );
-  }
-
-  if (route === '/usage' && req.method === 'POST') {
-    try {
-      const body = await readBody(req) as Record<string, unknown>;
-      observeUsage(body?.rows, body?.observedAt);
-      return json(res, 200, { ok: true }, origin);
-    } catch { return json(res, 400, { error: 'invalid_usage' }, origin); }
   }
 
   if (['/input/claim', '/input/bind', '/input/ack', '/input/fail', '/input/answer', '/input/progress', '/input/attachment'].includes(route) && req.method === 'POST') {

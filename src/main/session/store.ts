@@ -3482,11 +3482,19 @@ export async function latestHandoff(): Promise<Handoff | null> {
 // ------------------------------------------------------------------ prune
 
 /**
- * Compatibility seam for older callers. Age-based recording deletion was removed: only the
- * explicit delete-session and confirmed image-storage cleanup paths may remove history now.
+ * Delete recordings older than the configured retention window. Zero preserves history
+ * indefinitely for users who explicitly choose it.
  */
-export async function pruneSessions(_retainDays: number): Promise<number> {
-  return 0;
+export async function pruneSessions(retainDays: number): Promise<number> {
+  if (!Number.isFinite(retainDays) || retainDays <= 0) return 0;
+  const cutoff = Date.now() - retainDays * 86_400_000;
+  let removed = 0;
+  for (const session of await listUsageSessions()) {
+    if (session.updatedAt >= cutoff || open.has(session.id)) continue;
+    await deleteSession(session.id);
+    removed++;
+  }
+  return removed;
 }
 
 export async function deleteSession(id: string): Promise<void> {

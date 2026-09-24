@@ -10629,17 +10629,6 @@
     }
   }
 
-  let lastUsageProjection = '';
-  window.addEventListener('message', (event) => {
-    if (!alive || event.source !== window || event.origin !== location.origin || event.data?.type !== 'cos-usage') return;
-    const rows = event.data.rows;
-    if (!Array.isArray(rows) || rows.length > 80) return;
-    const observedAt = event.data.observedAt;
-    if (!Number.isFinite(observedAt)) return;
-    const encoded = JSON.stringify({ rows, observedAt });
-    if (encoded.length > 24000 || encoded === lastUsageProjection) return;
-    void ask({ type: 'usage_observation', rows, observedAt }).then((reply) => { if (reply?.ok) lastUsageProjection = encoded; });
-  });
   function flushStreamRequestOrigins() {
     const route = CLF_DOM.conversationId();
     const pendingEpoch = epoch, calls = [];
@@ -10676,7 +10665,6 @@
     const observedAt = Number.isFinite(event.data.observedAt) ? event.data.observedAt : Date.now();
     confirmStreamRequestOrigin(claimed, requestIds, observedAt);
   });
-  window.postMessage({ type: 'cos-usage-request' }, location.origin);
   let desktopDecision = null;
   let desktopDecisionSession = null;
   let desktopInputBusy = false;

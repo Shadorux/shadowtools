@@ -2992,12 +2992,6 @@ const HANDLERS = {
     const result = await call('/models', { method: 'POST', body });
     return result;
   },
-  async usage_observation(message, _sender, source) {
-    if (!ownsDocument(source) || !Array.isArray(message.rows) || message.rows.length > 80) return { ok: false };
-    const body = JSON.stringify({ rows: message.rows, observedAt: message.observedAt });
-    if (body.length > 24000) return { ok: false };
-    return call('/usage', { method: 'POST', body });
-  },
   async desktop_input(message, sender, source) {
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
     const id = String(message.id || '');
@@ -3741,7 +3735,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     'desktop_input',
     'model_catalog',
     'plugin_refresh',
-    'usage_observation',
     'events',
     'bind',
     'activity',
@@ -4229,7 +4222,7 @@ async function restoreChatgptTab(id, current = () => true, documentId = null) {
       // still present. Request-id ownership depends on fiber.js, and re-executing it is
       // idempotent because the helper keeps one listener per protocol version.
       try {
-        await chrome.scripting.executeScript({ target, world: 'MAIN', files: ['usage.js', 'fiber.js'] });
+        await chrome.scripting.executeScript({ target, world: 'MAIN', files: ['fiber.js'] });
       } catch {
         // The tab can navigate between the ping and repair. Static injection covers it.
       }
@@ -4247,7 +4240,7 @@ async function restoreChatgptTab(id, current = () => true, documentId = null) {
     // Keep the React/Fiber reader in ChatGPT's own world, exactly like the static manifest
     // declaration. An older helper may still answer too; the nonce/version gate in
     // content.js makes those replies harmless, and a future version bump rejects them.
-    await chrome.scripting.executeScript({ target, world: 'MAIN', files: ['usage.js', 'fiber.js'] });
+    await chrome.scripting.executeScript({ target, world: 'MAIN', files: ['fiber.js'] });
     if (!current()) return false;
     await chrome.scripting.executeScript({ target, files: ['content.js'] });
     if (!current()) return false;
