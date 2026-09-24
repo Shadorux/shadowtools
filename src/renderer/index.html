@@ -757,11 +757,11 @@
                     </span>
                     <input id="autoContinue" type="checkbox" />
                   </label>
-                  <div class="setting"><span class="setting-text"><b>Goal response source</b><em>API is the most reliable. Offline uses completion markers and 200 prepared messages.</em></span><select id="goalBackend"><option value="chatgpt">Separate ChatGPT chat</option><option value="api">API key · Most reliable</option><option value="templates">Offline · No API cost</option></select></div>
+                  <select id="goalBackend" hidden><option value="chatgpt">Disabled</option></select>
                   <select id="loopBackend" hidden><option value="chatgpt">Disabled</option></select>
-                  <div class="setting"><span class="setting-text"><b>Goal and Plan model</b><em>Model for ChatGPT-generated messages and plans. Select GPT-5.6 and High below for planning.</em></span><select id="helperModel" aria-label="Goal and Plan model"></select></div>
-                  <div class="setting"><span class="setting-text"><b>Goal and Plan reasoning</b><em>Used with the ChatGPT model above; independent from API reasoning.</em></span><select id="helperReasoning" aria-label="Goal and Plan reasoning"></select></div>
-                  <label class="setting"><span class="setting-text"><b>Include tool details in handoffs</b><em>Handoff briefs retain tool details. Goal uses user messages and assistant updates and answers.</em></span><input id="goalIncludeToolCalls" type="checkbox" /></label>
+                  <div class="setting"><span class="setting-text"><b>Plan model</b><em>Model for ChatGPT-generated plans. Select GPT-5.6 and High below for planning.</em></span><select id="helperModel" aria-label="Plan model"></select></div>
+                  <div class="setting"><span class="setting-text"><b>Plan reasoning</b><em>Used with the ChatGPT model above; independent from API reasoning.</em></span><select id="helperReasoning" aria-label="Plan reasoning"></select></div>
+                  <label class="setting"><span class="setting-text"><b>Include tool details in handoffs</b><em>Handoff briefs retain tool details.</em></span><input id="goalIncludeToolCalls" type="checkbox" /></label>
                   </div>
                 <h2 class="settings-section-title">ChatGPT models</h2>
                 <div class="pane">
@@ -791,7 +791,7 @@
                   <label class="setting">
                     <span class="setting-text">
                       <b>Recover other chats’ tabs</b>
-                      <em>Restore missing or unresponsive work chats. Goal chats recover automatically.</em>
+                      <em>Restore missing or unresponsive work chats.</em>
                     </span>
                     <input id="recoverAgentTabs" type="checkbox" />
                   </label>
@@ -803,9 +803,9 @@
                 </div>
                 <h2 class="settings-section-title">Keep the turn open</h2>
                 <div class="pane">
-                  <label class="setting"><span class="setting-text"><b>Plan generation</b><em>Create staged tasks. ChatGPT uses the Goal and Plan model above; API uses the model and reasoning in API provider settings.</em></span><select id="planBackend"><option value="chatgpt">ChatGPT</option><option value="api">API provider</option></select></label>
+                  <label class="setting"><span class="setting-text"><b>Plan generation</b><em>Create staged tasks. ChatGPT uses the Plan model above; API uses the model and reasoning in API provider settings.</em></span><select id="planBackend"><option value="chatgpt">ChatGPT</option><option value="api">API provider</option></select></label>
                   <label class="setting"><span class="setting-text"><b>Session finish</b><em>Ask Astra to keep the turn open for your next instruction. With Automatic plugin refresh enabled, tool changes refresh the connector after 20 seconds.</em></span><input id="finishTool" type="checkbox" /></label>
-                  <div class="setting"><span class="setting-text"><b>When ChatGPT is wrapping up</b><em>When Goal is enabled for this chat, finishing generates a follow-up toward that goal. When Off, you receive a notification.</em></span></div>
+                  <div class="setting"><span class="setting-text"><b>When ChatGPT is wrapping up</b><em>You receive a notification when the chat finishes.</em></span></div>
                   <div class="setting"><span class="setting-text"><b>Requested notice</b><em>A request to the model, not a guaranteed countdown.</em></span><select id="finishLeadMinutes"><option value="3">3 minutes</option><option value="5">5 minutes</option></select></div>
                   </div>
                 <h2 class="settings-section-title">Browser & history</h2>
@@ -818,7 +818,7 @@
                   <label class="setting"><span class="setting-text"><b>Overwrite ChatGPT tool rows</b><em>Show recorded local activity in the ChatGPT page.</em></span><input id="browserOverwrite" type="checkbox" disabled /></label>
                   <label class="setting"><span class="setting-text"><b>Show durations in ChatGPT</b><em>Uses the same preference as the extension popup.</em></span><input id="browserDurations" type="checkbox" disabled /></label>
                   <div class="setting"><span class="setting-text"><b>Browser preferences</b><em id="browserPreferencesStatus" role="status">Refresh to read the browser's current preferences.</em></span><button id="browserPreferencesRefresh" class="btn" type="button">Refresh browser preferences</button></div>
-                  <div class="setting">
+                  <div class="setting" hidden>
                     <span class="setting-text">
                       <b>Compact automatically</b>
                       <em id="autoCompactHint"></em>
@@ -917,7 +917,7 @@
                     </div>
                   </div>
 
-                  <div class="setting">
+                  <div class="setting" hidden>
                     <span class="setting-text">
                       <b>Goal prompt, with a task</b>
                       <em>Uses the objective saved in the chat controls. Stops when every requirement is met.</em>
@@ -964,12 +964,11 @@
                     <div class="composer-popover">
                       <div class="automation-switch" id="automationSwitch" role="radiogroup" aria-label="Chat mode">
                         <button type="button" role="radio" aria-checked="true" data-mode="off" data-keep-menu="true">Off</button>
-                        <button type="button" role="radio" aria-checked="false" data-mode="goal" data-keep-menu="true">Goal</button>
                         </div><select hidden id="chatAutomation" aria-label="Chat automation"><option value="off">Off</option><option value="goal">Goal</option></select>
                       <label id="loopDeliveryRow" hidden><select id="loopDelivery"><option value="finish">Only finish</option></select></label>
               <div id="sessionControls" hidden>
                 <div class="session-controls-menu">
-                  <label for="sessionObjective">This chat's goal</label>
+                  <label for="sessionObjective">Task</label>
                   <textarea dir="auto" id="sessionObjective" rows="3" maxlength="16000" placeholder="What should this chat achieve?"></textarea>
                   <button id="saveSessionObjective" data-keep-menu="true" type="button"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check" /></svg><span>Save task</span></button>
                   <select hidden id="sessionObjectiveMode" aria-label="Goal behavior"><option value="goal">Goal · stop when complete</option></select>
