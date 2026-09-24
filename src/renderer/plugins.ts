@@ -41,7 +41,7 @@ async function mutate(work: ReturnType<typeof window.api.pluginsSnapshot>, notif
   const own = ++epoch; const result = await run(work);
   if (!result) return false;
   if (own === epoch) { snapshot = result; renderInstalled(); }
-  if (notify) toast(t("Plugin settings saved. Refresh the Chat On Steroids Plugins connector in ChatGPT to update its tools."));
+  if (notify) toast(t("Plugin settings saved. Refresh the ShadowTools Plugins connector in ChatGPT to update its tools."));
   return true;
 }
 export async function refreshPlugins(): Promise<void> { await mutate(window.api.pluginsSnapshot(), false); }
@@ -55,7 +55,7 @@ export function applyPluginsState(next: AppState): void {
   ui($('pluginsSetupTitle'), 'textContent', () => configured ? t("Your Plugins connector") : t("Set up plugins before your first use"));
   ui($('pluginsSetupHint'), 'textContent', () => configured
     ? t("Your enabled plugins share one connector in ChatGPT. Manage its connection here.")
-    : t("Add the Chat On Steroids Plugins connector in ChatGPT once so it can use your installed plugins."));
+    : t("Add the ShadowTools Plugins connector in ChatGPT once so it can use your installed plugins."));
   ui($('pluginsSetupLink'), 'textContent', () => configured ? t("Plugin setup") : t("Set up plugins"));
   $('pluginsSetupLink').classList.toggle('btn-solid', !configured);
   ui(status, 'textContent', () => surface?.state === 'live'
@@ -89,8 +89,8 @@ function showConnection(): void {
     else key = field(body, () => t("Tunnel API key"), '', true, () => t("Use a restricted key with Tunnels: Read and Tunnels: Use. It is stored securely and shared with your other connectors."));
   }
   // Values needed for ChatGPT setup stay copyable; tool lists belong to each plugin.
-  copy(t("Connector name"), surface?.connectorName ?? 'Chat On Steroids Plugins');
-  copy(t("Description"), surface?.description ?? 'Tools from your enabled Chat On Steroids plugins.');
+  copy(t("Connector name"), surface?.connectorName ?? 'ShadowTools Plugins');
+  copy(t("Description"), surface?.description ?? 'Tools from your enabled ShadowTools plugins.');
   const url = surface?.publicUrl ?? (config.tunnel.kind === 'manual' ? surface?.localUrl : null);
   if (url) copy(t("MCP server URL"), url);
   body.append(el('p', 'hint', () => config.tunnel.kind === 'openai'
