@@ -157,6 +157,9 @@ export interface ActionResult {
   clipboard: string[];
   completedCount: number;
   routes: ActionRoute[];
+  /** Present only when the caller supplied a visual fingerprint to compare after input. */
+  changed?: boolean | null;
+  afterHash?: string | null;
 }
 
 export type VerificationSpec =
@@ -1163,6 +1166,20 @@ export async function getWindowState(opts: {
   });
 }
 
+/** Cheap visual-change probe for post-action verification. It deliberately avoids PNG
+ * encoding, disk I/O and UI Automation; callers compare hashes and request a real
+ * observation only when pixels changed or they actually need to inspect the result. */
+export async function getWindowFrameHash(window: number, sample = 16): Promise<string> {
+  return exclusive(() => windowFrameHashLocked(window, sample));
+}
+
+async function windowFrameHashLocked(window: number, sample = 16): Promise<string> {
+  const reply = await runHelper({ op: 'framehash', id: window, sample: Math.min(32, Math.max(8, Math.floor(sample))) });
+  const hash = reply['hash'];
+  if (typeof hash !== 'string' || hash.length === 0) throw new ComputerError('The desktop helper returned no frame hash.');
+  return hash;
+}
+
 export async function waitForWindow(opts: {
   title?: string;
   process?: string;
@@ -1497,6 +1514,22 @@ export async function actAndCapture(
   });
 }
 
+/** Act and cheaply determine whether the target's pixels changed, under one ownership lock. */
+export async function actAndDetectChange(
+  actions: Action[],
+  opts: { window: number; frameId?: number; app?: string; ownerWindow?: number; ownerApp?: string; sample?: number }
+): Promise<ActionResult & { changed: boolean; beforeHash: string; afterHash: string }> {
+  return exclusive(async () => {
+    const beforeHash = await windowFrameHashLocked(opts.window, opts.sample);
+    // Ask the same native action request for the post-action fingerprint. This avoids a
+    // second helper round trip while preserving the exclusive ownership fence.
+    const result = await actLocked(actions, { ...opts, detectChangeHash: beforeHash, detectChangeSample: opts.sample });
+    const afterHash = result.afterHash;
+    if (typeof afterHash !== 'string') throw new ComputerError('The desktop helper returned no post-action frame hash.');
+    return { ...result, changed: beforeHash !== afterHash, beforeHash, afterHash };
+  });
+}
+
 async function verifyDesktopLocked(spec: VerificationSpec): Promise<VerificationResult> {
   const startedAt = Date.now();
   const timeoutMs = Math.min(10_000, Math.max(0, Math.floor(spec.timeoutMs ?? 2_000)));
@@ -1573,7 +1606,7 @@ async function verifyDesktopLocked(spec: VerificationSpec): Promise<Verification
 
 async function actLocked(
   actions: Action[],
-  opts: { frameId?: number; window?: number; ownerWindow?: number; app?: string; ownerApp?: string }
+  opts: { frameId?: number; window?: number; ownerWindow?: number; app?: string; ownerApp?: string; detectChangeHash?: string; detectChangeSample?: number }
 ): Promise<ActionResult> {
   if (process.platform !== 'win32' && actions.some(action => action.type === 'paste' || action.type === 'launch_app' || action.type === 'ui_action')) {
     throw new ComputerError('ACTION_UNSUPPORTED: paste, launch_app and ui_action are currently Windows only.');
@@ -1779,6 +1812,10 @@ async function actLocked(
       reply = await runHelper({
         op: 'act',
         actions: sending,
+        ...(opts.detectChangeHash === undefined || opts.window === undefined ? {} : {
+          detectChangeWindow: opts.window,
+          detectChangeSample: Math.min(32, Math.max(8, Math.floor(opts.detectChangeSample ?? 16)))
+        }),
         ...(opts.window === undefined ? {} : { targetWindow: opts.window }),
         ...(opts.ownerWindow === undefined ? {} : { ownerWindow: opts.ownerWindow }),
         ...(opts.app === undefined ? {} : { targetApp: opts.app }),
@@ -1936,7 +1973,11 @@ async function actLocked(
     },
     clipboard,
     completedCount,
-    routes
+    routes,
+    ...(opts.detectChangeHash === undefined ? {} : {
+      changed: typeof reply['afterHash'] === 'string' ? reply['afterHash'] !== opts.detectChangeHash : null,
+      afterHash: typeof reply['afterHash'] === 'string' ? reply['afterHash'] : null
+    })
   };
 }
 

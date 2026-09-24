@@ -74,7 +74,8 @@ describe('a swapped-button mouse still gets a primary click (issue #76)', () => 
       expect(body, `${caller} should ask ButtonFlags rather than choosing flags itself`)
         .toMatch(/ButtonFlags\(button, out down, out up\)/);
     }
-    // And the click_ref fallback goes through Click, so it inherits the same decision.
-    expect(HELPER_SCRIPT).toMatch(/\[Clf\]::Click\(/);
+    // And the click_ref fallback goes through ClickVisible -> Click, so it inherits
+    // the same decision while retaining the model-visible pointer animation.
+    expect(HELPER_SCRIPT).toMatch(/\[Clf\]::ClickVisible\(/);
   });
 });

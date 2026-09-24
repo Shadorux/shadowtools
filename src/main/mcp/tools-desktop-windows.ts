@@ -69,20 +69,20 @@ const DESCRIPTIONS: Record<string, string> = {
   list_apps: 'List installed and running Windows apps with their exact owned windows.',
   launch_app: 'Launch an observed app id or explicit .exe path/name, without command arguments. Observe its window afterward.',
   get_window_state: 'Observe without activation. Images default on; include_text adds controls. query matches name/automation id; role filters type; max_elements limits matches. Search implies text. include_screenshot:false skips pixels. Use returned image coordinates.',
-  click: 'Click image-pixel x/y in the selected screenshot or current element_index; supports mouse_button and click_count. Omit screenshotId for the main image. Refresh state after input.',
-  press_key: 'Press a keysym-style key or chord (Control_L+s) in the exact window. The plus key accepts plus, + or Control_L++. Automatically activates its target.',
-  type_text: 'Type literal text in the exact window. Multiline text uses clipboard paste and the existing clipboard-write permission.',
-  scroll: 'Scroll by horizontal/vertical wheel deltas at image-pixel x/y in the selected screenshot; positive Y scrolls down.',
-  set_value: 'Replace the value of an indexed editable control from the latest accessibility state.',
-  drag: 'Drag smoothly between two image-pixel coordinates in the selected screenshot, then release.',
-  perform_secondary_action: 'Perform an advertised accessibility action on an element_index; action labels are case-insensitive.',
+  click: 'Click image-pixel x/y in the selected screenshot or current element_index; supports mouse_button and click_count. Omit screenshotId for the main image. Set capture_after:true when you need to see the immediate result; it returns the post-click screenshot in the same tool call and authorizes coordinates from that new frame.',
+  press_key: 'Press a keysym-style key or chord (Control_L+s) in the exact window. The plus key accepts plus, + or Control_L++. Automatically activates its target. Set capture_after:true to return the resulting screenshot in the same call.',
+  type_text: 'Type literal text in the exact window. Multiline text uses clipboard paste and the existing clipboard-write permission. Set capture_after:true to return the resulting screenshot in the same call.',
+  scroll: 'Scroll by horizontal/vertical wheel deltas at image-pixel x/y in the selected screenshot; positive Y scrolls down. Set capture_after:true to return the resulting screenshot in the same call.',
+  set_value: 'Replace the value of an indexed editable control from the latest accessibility state. Set capture_after:true to return the resulting screenshot in the same call.',
+  drag: 'Drag smoothly between two image-pixel coordinates in the selected screenshot, then release. Set capture_after:true to return the resulting screenshot in the same call.',
+  perform_secondary_action: 'Perform an advertised accessibility action on an element_index; action labels are case-insensitive. Set capture_after:true to return the resulting screenshot in the same call.',
   activate_window: 'Activate an exact returned window. Input methods already activate their target automatically. This consumes prior observation indexes and coordinates; get_window_state again before using them.'
 };
 
 function desktopResult(method: string, value: unknown): ToolResult {
   const content: ToolContent[] = [];
   let metadata = value;
-  if (method === 'get_window_state' && value && typeof value === 'object' && 'screenshots' in value) {
+  if ((method === 'get_window_state' || ['click', 'press_key', 'type_text', 'scroll', 'set_value', 'drag', 'perform_secondary_action'].includes(method)) && value && typeof value === 'object' && 'screenshots' in value) {
     const state = value as { screenshots: Array<{ url: string; [key: string]: unknown }> };
     metadata = { ...state, screenshots: state.screenshots.map(({ url: _url, ...shot }) => shot) };
     for (const shot of state.screenshots) {

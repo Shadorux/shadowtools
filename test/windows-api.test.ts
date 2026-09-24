@@ -16,7 +16,8 @@ function fixture() {
     getWindowState: vi.fn(async () => result),
     listWindows: vi.fn(async () => ({ windows: [nativeWindow], screen: shot.region })),
     listDesktopApps: vi.fn(async () => ({ apps: [{ id: window.app, displayName: 'Fixture', windows: [nativeWindow] }], truncated: false })),
-    act: vi.fn(async () => ({ cursor: null, clipboard: [], completedCount: 1, routes: ['sendinput' as const] }))
+    act: vi.fn(async () => ({ cursor: null, clipboard: [], completedCount: 1, routes: ['sendinput' as const] })),
+    actAndCapture: vi.fn(async () => ({ cursor: null, clipboard: [], completedCount: 1, routes: ['sendinput' as const], screenshot: { ...shot, frameId: 9 }, verification: null }))
   };
   return { backend, result, api: createWindowsComputerApi(backend) };
 }
@@ -27,7 +28,7 @@ describe('Windows Window2 interface', () => {
     expect(WINDOWS_API_METHODS).toHaveLength(13);
     expect(await api.list_windows()).toEqual([{ ...window, state: 'open' }]);
     const state = await api.get_window_state({ window });
-    expect(backend.getWindowState).toHaveBeenLastCalledWith(expect.objectContaining({ includeScreenshot: true, includeUi: false }));
+    expect(backend.getWindowState).toHaveBeenLastCalledWith(expect.objectContaining({ includeScreenshot: true, includeUi: false, includeRelated: false }));
     expect(state.accessibility).toBeNull();
     expect(state.window).toMatchObject({ state: 'open' });
     expect(state.screenshots[0]).toEqual({ id: 'frame-1', url: 'data:image/png;base64,AA==', width: 300, height: 225, originX: 100, originY: 200, zIndex: 0 });
@@ -97,6 +98,79 @@ describe('Windows Window2 interface', () => {
     await api.type_text({ window, text: 'first\nsecond' });
     expect(backend.act).toHaveBeenLastCalledWith([{ type: 'paste', text: 'first\nsecond' }], { window: 42, app: window.app });
   });
+  it('does not add a redundant native window-state round trip before observed input', async () => {
+    const { api, backend } = fixture();
+    await api.get_window_state({ window, include_text: true });
+    vi.mocked(backend.getWindowState).mockClear();
+    await api.click({ window, element_index: 0 });
+    expect(backend.getWindowState).not.toHaveBeenCalled();
+
+    await api.get_window_state({ window });
+    vi.mocked(backend.getWindowState).mockClear();
+    await api.click({ window, x: 20, y: 40 });
+    expect(backend.getWindowState).not.toHaveBeenCalled();
+  });
+  it('can click and return the next authoritative screenshot in one backend round trip', async () => {
+    const { api, backend } = fixture();
+    await api.get_window_state({ window });
+    const next = await api.click({ window, x: 20, y: 40, capture_after: true });
+    expect(backend.actAndCapture).toHaveBeenCalledExactlyOnceWith(
+      [{ type: 'click', x: 20, y: 40, button: 'left', count: 1 }],
+      { frameId: 1, window: 42, app: window.app, capture: { window: 42 } }
+    );
+    expect(next?.screenshots[0]).toMatchObject({ id: 'frame-9', width: 300, height: 225 });
+    await api.click({ window, screenshotId: 'frame-9', x: 5, y: 5 });
+    expect(backend.act).toHaveBeenLastCalledWith(
+      [{ type: 'click', x: 5, y: 5, button: 'left', count: 1 }],
+      { frameId: 9, window: 42, app: window.app }
+    );
+  });
+  it('can return a fresh screenshot with scroll, set value, drag and secondary actions', async () => {
+    const { api, backend } = fixture();
+    await api.get_window_state({ window, include_text: true });
+    await expect(api.scroll({ window, x: 20, y: 40, scrollX: 0, scrollY: 120, capture_after: true })).resolves.toMatchObject({ screenshots: [{ id: 'frame-9' }] });
+    expect(backend.actAndCapture).toHaveBeenLastCalledWith(
+      [{ type: 'scroll', x: 20, y: 40, scroll_x: 0, scroll_y: 120, scrollUnit: 'wheel' }],
+      { frameId: 1, window: 42, app: window.app, capture: { window: 42 } }
+    );
+
+    await api.get_window_state({ window, include_text: true });
+    await api.set_value({ window, element_index: 0, value: 'next', capture_after: true });
+    expect(backend.actAndCapture).toHaveBeenLastCalledWith(
+      [{ type: 'set_value', ref: 'ref-1', text: 'next' }],
+      { window: 42, app: window.app, capture: { window: 42 } }
+    );
+
+    await api.get_window_state({ window });
+    await api.drag({ window, from_x: 10, from_y: 20, to_x: 30, to_y: 40, capture_after: true });
+    expect(backend.actAndCapture).toHaveBeenLastCalledWith(
+      [{ type: 'drag', path: [{ x: 10, y: 20 }, { x: 30, y: 40 }] }],
+      { frameId: 1, window: 42, app: window.app, capture: { window: 42 } }
+    );
+
+    await api.get_window_state({ window, include_text: true });
+    await api.perform_secondary_action({ window, element_index: 0, action: 'Toggle', capture_after: true });
+    expect(backend.actAndCapture).toHaveBeenLastCalledWith(
+      [{ type: 'ui_action', ref: 'ref-1', action: 'toggle' }],
+      { window: 42, app: window.app, capture: { window: 42 } }
+    );
+  });
+  it('can return a fresh screenshot with keyboard and text input', async () => {
+    const { api, backend } = fixture();
+    await api.get_window_state({ window });
+    await expect(api.press_key({ window, key: 'Enter', capture_after: true })).resolves.toMatchObject({ screenshots: [{ id: 'frame-9' }] });
+    expect(backend.actAndCapture).toHaveBeenLastCalledWith(
+      [{ type: 'keypress', keys: ['Enter'] }],
+      { window: 42, app: window.app, capture: { window: 42 } }
+    );
+
+    await api.get_window_state({ window });
+    await api.type_text({ window, text: 'hello', capture_after: true });
+    expect(backend.actAndCapture).toHaveBeenLastCalledWith(
+      [{ type: 'type', text: 'hello' }],
+      { window: 42, app: window.app, capture: { window: 42 } }
+    );
+  });
   it('rejects wrong app identities and screenshot ids from a replaced observation', async () => {
     const { api, result, backend } = fixture();
     await expect(api.get_window({ id: 42, app: 'wrong' })).rejects.toThrow('WINDOW_NOT_FOUND');
@@ -126,15 +200,15 @@ describe('Windows Window2 interface', () => {
     await expect(other.click({ window, x: 1, y: 1 })).rejects.toThrow('STALE_WINDOW_STATE');
     await expect(other.set_value({ window, element_index: 0, value: 'x' })).rejects.toThrow('STALE_WINDOW_STATE');
   });
-  it('rejects an old action when a newer observation wins its app-identity await', async () => {
+  it('rejects an old unbound action when a newer observation wins its app-identity await', async () => {
     const { api, backend, result } = fixture();
     await api.get_window_state({ window });
     let complete!: (value: typeof result) => void;
     vi.mocked(backend.getWindowState).mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
-    const click = api.click({ window, x: 1, y: 1 });
+    const keypress = api.press_key({ window, key: 'A' });
     await api.get_window_state({ window });
     complete(result);
-    await expect(click).rejects.toThrow('observation changed');
+    await expect(keypress).rejects.toThrow('observation changed');
     expect(backend.act).not.toHaveBeenCalled();
   });
   it('evicts old observation authority at the bounded thirty-two-window limit', async () => {

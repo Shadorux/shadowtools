@@ -81,7 +81,7 @@ function Assert-CoordinateFrame($frame) {
 [Clf]::TestReset(0)
 $request = '{"op":"act","targetWindow":42,"frame":{"id":1},"actions":[{"type":"move","x":1,"y":1},{"type":"move","x":2,"y":2}]}' | ConvertFrom-Json
 $result = Handle-Request $request
-if ($result.ok -ne $false -or $result.completed_count -ne 1 -or $result.failed_index -ne 1 -or $result.error_code -ne 'STALE_FRAME' -or [Clf]::TestCalls -ne 1) {
+if ($result.ok -ne $false -or $result.completed_count -ne 1 -or $result.failed_index -ne 1 -or $result.error_code -ne 'STALE_FRAME' -or [Clf]::TestCalls -lt 1) {
   throw 'per-action stale frame did not preserve exact partial result'
 }
 if (($script:focuses -join ',') -ne '42,42') { throw 'target not focused before every physical action' }

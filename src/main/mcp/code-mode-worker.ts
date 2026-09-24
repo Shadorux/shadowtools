@@ -65,7 +65,7 @@ function finish(error) { if (closed) return; send({ type: 'done', error }); clos
             'text(message); throw new Error(message || "Desktop operation failed"); } ' +
           'if (!result.structuredContent || !("value" in result.structuredContent)) throw new Error("Invalid Desktop result"); ' +
           'const value = result.structuredContent.value; ' +
-          'if (name === "get_window_state") { for (const part of result.content) { if (part.type === "image") image(part); } } ' +
+          'if (name === "get_window_state" || ["click","press_key","type_text","scroll","set_value","drag","perform_secondary_action"].includes(name)) { for (const part of result.content) { if (part.type === "image") image(part); } } ' +
           'return value === null ? undefined : value; }; } ' +
       'sky.target = "windows"; Object.defineProperties(globalThis, {sky:{value:Object.freeze(sky)}, nodeRepl:{value:Object.freeze({write:text})}}); '
       : '') +

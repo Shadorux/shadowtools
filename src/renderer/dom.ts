@@ -1,4 +1,4 @@
-import { currentLanguage, t, ui } from './i18n.js';
+import { t, ui } from './i18n.js';
 /**
  * The handful of DOM helpers both panels need.
  *
@@ -31,13 +31,12 @@ export const $ = <T extends HTMLElement>(id: string): T => document.getElementBy
 
 /** Filter complete settings sections so headings, controls and their context stay together. */
 export function filterSettingsSections(view: HTMLElement, search: string): void {
-  const fold = (text: string) => text.toLocaleLowerCase(currentLanguage());
-  const query = fold(search.trim());
+  const query = search.trim().toLowerCase();
   let matches = 0;
   for (const heading of view.querySelectorAll<HTMLElement>('.settings-section-title')) {
     const pane = heading.nextElementSibling as HTMLElement | null;
     if (!pane?.classList.contains('pane')) continue;
-    const visible = !query || fold(`${heading.textContent} ${pane.textContent}`).includes(query);
+    const visible = !query || `${heading.textContent} ${pane.textContent}`.toLowerCase().includes(query);
     heading.hidden = pane.hidden = !visible;
     if (visible) matches++;
   }
@@ -55,13 +54,13 @@ export function toast(message: string): void {
   toastTimer = window.setTimeout(() => node.remove(), 3200);
 }
 
-/** Unwraps IPC replies, translating known app errors and preserving unknown error text. */
+/** Unwraps an IPC reply, showing the main process's own error text on failure. */
 export async function run<T>(
   promise: Promise<{ ok: true; data: T } | { ok: false; error: string }>
 ): Promise<T | null> {
   const reply = await promise;
   if (!reply.ok) {
-    toast(t(reply.error));
+    toast(reply.error);
     return null;
   }
   return reply.data;

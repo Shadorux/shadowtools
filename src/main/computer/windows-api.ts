@@ -1,7 +1,7 @@
 /** Windows Window2 interface over the existing native capture/input owner. */
 import { z } from 'zod';
 import { WINDOWS_COMPUTER_METHODS } from '../../shared/windows-computer.js';
-import { act, ComputerError, getWindowState, listDesktopApps, listWindows, type Action, type Screenshot, type UiActionName, type WindowInfo } from './index.js';
+import { act, actAndCapture, ComputerError, getWindowState, listDesktopApps, listWindows, type Action, type Screenshot, type UiActionName, type WindowInfo } from './index.js';
 
 const windowSchema = z.object({ app: z.string().min(1), id: z.number().int().positive(), title: z.string().optional() });
 const point = { x: z.number().finite(), y: z.number().finite() };
@@ -13,13 +13,13 @@ export const WINDOWS_API_SCHEMAS = {
   list_apps: z.object({}),
   launch_app: z.object({ app: z.string().min(1).max(32768) }),
   get_window_state: z.object({ window: windowSchema, include_screenshot: z.boolean().optional(), include_text: z.boolean().optional(), query: z.string().max(256).optional(), role: z.string().max(100).optional(), max_elements: z.number().int().min(1).max(100).optional() }),
-  click: z.object({ window: windowSchema, click_count: z.number().int().min(1).max(3).optional(), element_index: z.number().int().nonnegative().optional(), mouse_button: z.enum(['left', 'right', 'middle', 'l', 'r', 'm']).optional(), screenshotId, x: point.x.optional(), y: point.y.optional() }),
-  press_key: z.object({ window: windowSchema, key: z.string().min(1).max(200) }),
-  type_text: z.object({ window: windowSchema, text: z.string().max(100000) }),
-  scroll: z.object({ window: windowSchema, screenshotId, ...point, scrollX: wheelDelta, scrollY: wheelDelta }),
-  set_value: z.object({ window: windowSchema, element_index: z.number().int().nonnegative(), value: z.string().max(100000) }),
-  drag: z.object({ window: windowSchema, from_x: point.x, from_y: point.y, to_x: point.x, to_y: point.y, screenshotId }),
-  perform_secondary_action: z.object({ window: windowSchema, element_index: z.number().int().nonnegative(), action: z.string().min(1).max(100) }),
+  click: z.object({ window: windowSchema, click_count: z.number().int().min(1).max(3).optional(), element_index: z.number().int().nonnegative().optional(), mouse_button: z.enum(['left', 'right', 'middle', 'l', 'r', 'm']).optional(), screenshotId, x: point.x.optional(), y: point.y.optional(), capture_after: z.boolean().optional() }),
+  press_key: z.object({ window: windowSchema, key: z.string().min(1).max(200), capture_after: z.boolean().optional() }),
+  type_text: z.object({ window: windowSchema, text: z.string().max(100000), capture_after: z.boolean().optional() }),
+  scroll: z.object({ window: windowSchema, screenshotId, ...point, scrollX: wheelDelta, scrollY: wheelDelta, capture_after: z.boolean().optional() }),
+  set_value: z.object({ window: windowSchema, element_index: z.number().int().nonnegative(), value: z.string().max(100000), capture_after: z.boolean().optional() }),
+  drag: z.object({ window: windowSchema, from_x: point.x, from_y: point.y, to_x: point.x, to_y: point.y, screenshotId, capture_after: z.boolean().optional() }),
+  perform_secondary_action: z.object({ window: windowSchema, element_index: z.number().int().nonnegative(), action: z.string().min(1).max(100), capture_after: z.boolean().optional() }),
   activate_window: z.object({ window: windowSchema })
 } as const;
 export const WINDOWS_API_METHODS = WINDOWS_COMPUTER_METHODS;
@@ -34,6 +34,7 @@ export interface WindowsWindowState {
 }
 export interface WindowsComputerBackend {
   act: typeof act;
+  actAndCapture: typeof actAndCapture;
   getWindowState: typeof getWindowState;
   listDesktopApps: typeof listDesktopApps;
   listWindows: typeof listWindows;
@@ -62,7 +63,7 @@ export function parseWindowsKeyChord(key: string): string[] {
 }
 
 /** Create once per caller principal. Cached state contains no image bytes or UI text. */
-export function createWindowsComputerApi(backend: WindowsComputerBackend = { act, getWindowState, listDesktopApps, listWindows }) {
+export function createWindowsComputerApi(backend: WindowsComputerBackend = { act, actAndCapture, getWindowState, listDesktopApps, listWindows }) {
   // Pending observations occupy the same bounded map. Replacing an entry fences late results.
   const states = new Map<number, { state?: State }>();
   const parse = <K extends keyof typeof WINDOWS_API_SCHEMAS>(method: K, input: unknown): z.infer<(typeof WINDOWS_API_SCHEMAS)[K]> => WINDOWS_API_SCHEMAS[method].parse(input ?? {}) as z.infer<(typeof WINDOWS_API_SCHEMAS)[K]>;
@@ -93,13 +94,30 @@ export function createWindowsComputerApi(backend: WindowsComputerBackend = { act
     const opts = { frameId: frame.frameId, window: frame.windowId, app: frame.app, ...(frame.windowId === window.id ? {} : { ownerWindow: window.id, ownerApp: window.app }) };
     return { x, y, opts };
   }
-  async function mutate(window: WindowsWindow | undefined, action: Action, opts?: Parameters<typeof act>[1]) {
+  async function mutate(window: WindowsWindow | undefined, action: Action, opts?: Parameters<typeof act>[1], needsFreshWindow = true) {
     const expected = window ? states.get(window.id) : undefined;
-    if (window) await current(window);
+    // Coordinate/ref actions are already bound to an observed frame or UI snapshot.
+    // Re-querying the native helper before every input adds a full serialized helper
+    // round trip and makes desktop control visibly lag behind the model. Keep the
+    // identity check for unbound keyboard/focus actions, where no observation token
+    // reaches the native action itself.
+    if (window && needsFreshWindow) await current(window);
     if (window && states.get(window.id) !== expected) throw new ComputerError('STALE_WINDOW_STATE: observation changed before input.');
     // A submitted input consumes observation authority even if the native operation fails.
     states.clear();
     await backend.act([action], opts ?? (window ? { window: window.id, app: window.app } : {}));
+  }
+  async function mutateAndCapture(window: WindowsWindow, action: Action, opts: NonNullable<Parameters<typeof act>[1]>): Promise<WindowsWindowState> {
+    const expected = states.get(window.id);
+    if (states.get(window.id) !== expected) throw new ComputerError('STALE_WINDOW_STATE: observation changed before input.');
+    states.clear();
+    const result = await backend.actAndCapture([action], { ...opts, capture: { window: opts.window ?? window.id } });
+    const shot = result.screenshot;
+    if (!shot) throw new ComputerError('CAPTURE_AFTER_FAILED: input completed but no screenshot was returned. Observe again; do not repeat the action.');
+    const id = `frame-${shot.frameId}`;
+    const state: State = { app: window.app, primary: id, refs: [], frames: new Map([[id, { frameId: shot.frameId, width: shot.width, height: shot.height, windowId: shot.windowId, app: window.app }]]) };
+    states.set(window.id, { state });
+    return { window, focused: shot.focused, screenshots: [{ id, url: `data:image/png;base64,${shot.data}`, width: shot.width, height: shot.height, originX: shot.region.x, originY: shot.region.y, zIndex: 0 }], accessibility: null };
   }
   return {
     target: 'windows' as const,
@@ -132,7 +150,10 @@ export function createWindowsComputerApi(backend: WindowsComputerBackend = { act
       const pending: { state?: State } = {};
       states.delete(args.window.id); states.set(args.window.id, pending);
       while (states.size > 32) states.delete(states.keys().next().value!);
-      const result = await backend.getWindowState({ window: args.window.id, includeScreenshot, includeUi, includeRelated: includeScreenshot, maxElements: args.max_elements ?? 100,
+      // Related popup capture can cost up to three additional serialized native screenshots.
+      // The normal Desktop API has no way to address those popup frames independently unless
+      // they are explicitly observed as windows, so don't pay that cost on every screenshot.
+      const result = await backend.getWindowState({ window: args.window.id, includeScreenshot, includeUi, includeRelated: false, maxElements: args.max_elements ?? 100,
         ...(args.query === undefined ? {} : { query: args.query }), ...(args.role === undefined ? {} : { role: args.role }) });
       if (states.get(args.window.id) !== pending) throw new ComputerError('STALE_WINDOW_STATE: observation was superseded.');
       const window = publicWindow(result.window);
@@ -173,41 +194,63 @@ export function createWindowsComputerApi(backend: WindowsComputerBackend = { act
         accessibility
       };
     },
-    async click(input: unknown): Promise<void> {
+    async click(input: unknown): Promise<void | WindowsWindowState> {
       const a = parse('click', input);
       const button = ({ l: 'left', r: 'right', m: 'middle' } as Record<string, string>)[a.mouse_button ?? 'left'] ?? a.mouse_button ?? 'left';
       if (a.element_index !== undefined) {
         if (a.x !== undefined || a.y !== undefined || a.screenshotId !== undefined) throw new ComputerError('Choose element_index or screenshot coordinates.');
-        await mutate(a.window, { type: 'click_ref', ref: element(a.window, a.element_index).ref, button, count: a.click_count ?? 1 });
+        const action: Action = { type: 'click_ref', ref: element(a.window, a.element_index).ref, button, count: a.click_count ?? 1 };
+        if (a.capture_after) return mutateAndCapture(a.window, action, { window: a.window.id, app: a.window.app });
+        await mutate(a.window, action, undefined, false);
       } else {
         if (a.x === undefined || a.y === undefined) throw new ComputerError('Coordinate click requires x and y.');
         const p = coordinate(a.window, a.screenshotId, a.x, a.y);
-        await mutate(a.window, { type: 'click', x: p.x, y: p.y, button, count: a.click_count ?? 1 }, p.opts);
+        const action: Action = { type: 'click', x: p.x, y: p.y, button, count: a.click_count ?? 1 };
+        if (a.capture_after) return mutateAndCapture(a.window, action, p.opts);
+        await mutate(a.window, action, p.opts, false);
       }
     },
-    async press_key(input: unknown): Promise<void> {
+    async press_key(input: unknown): Promise<void | WindowsWindowState> {
       const a = parse('press_key', input); const keys = parseWindowsKeyChord(a.key);
-      await mutate(a.window, { type: 'keypress', keys });
+      const action: Action = { type: 'keypress', keys };
+      if (a.capture_after) {
+        await current(a.window);
+        return mutateAndCapture(a.window, action, { window: a.window.id, app: a.window.app });
+      }
+      await mutate(a.window, action);
     },
-    async type_text(input: unknown): Promise<void> {
-      const a = parse('type_text', input); await mutate(a.window, { type: /[\r\n]/.test(a.text) ? 'paste' : 'type', text: a.text });
+    async type_text(input: unknown): Promise<void | WindowsWindowState> {
+      const a = parse('type_text', input); const action: Action = { type: /[\r\n]/.test(a.text) ? 'paste' : 'type', text: a.text };
+      if (a.capture_after) {
+        await current(a.window);
+        return mutateAndCapture(a.window, action, { window: a.window.id, app: a.window.app });
+      }
+      await mutate(a.window, action);
     },
-    async scroll(input: unknown): Promise<void> {
+    async scroll(input: unknown): Promise<void | WindowsWindowState> {
       const a = parse('scroll', input); const p = coordinate(a.window, a.screenshotId, a.x, a.y);
-      await mutate(a.window, { type: 'scroll', x: p.x, y: p.y, scroll_x: Math.round(a.scrollX), scroll_y: Math.round(a.scrollY), scrollUnit: 'wheel' }, p.opts);
+      const action: Action = { type: 'scroll', x: p.x, y: p.y, scroll_x: Math.round(a.scrollX), scroll_y: Math.round(a.scrollY), scrollUnit: 'wheel' };
+      if (a.capture_after) return mutateAndCapture(a.window, action, p.opts);
+      await mutate(a.window, action, p.opts, false);
     },
-    async set_value(input: unknown): Promise<void> {
-      const a = parse('set_value', input); await mutate(a.window, { type: 'set_value', ref: element(a.window, a.element_index).ref, text: a.value });
+    async set_value(input: unknown): Promise<void | WindowsWindowState> {
+      const a = parse('set_value', input); const action: Action = { type: 'set_value', ref: element(a.window, a.element_index).ref, text: a.value };
+      if (a.capture_after) return mutateAndCapture(a.window, action, { window: a.window.id, app: a.window.app });
+      await mutate(a.window, action, undefined, false);
     },
-    async drag(input: unknown): Promise<void> {
+    async drag(input: unknown): Promise<void | WindowsWindowState> {
       const a = parse('drag', input); const from = coordinate(a.window, a.screenshotId, a.from_x, a.from_y); const to = coordinate(a.window, a.screenshotId, a.to_x, a.to_y);
-      await mutate(a.window, { type: 'drag', path: [{ x: from.x, y: from.y }, { x: to.x, y: to.y }] }, from.opts);
+      const action: Action = { type: 'drag', path: [{ x: from.x, y: from.y }, { x: to.x, y: to.y }] };
+      if (a.capture_after) return mutateAndCapture(a.window, action, from.opts);
+      await mutate(a.window, action, from.opts, false);
     },
-    async perform_secondary_action(input: unknown): Promise<void> {
+    async perform_secondary_action(input: unknown): Promise<void | WindowsWindowState> {
       const a = parse('perform_secondary_action', input); const ref = element(a.window, a.element_index);
       const action = ref.actions.find(key => labels[key].toLowerCase() === a.action.trim().toLowerCase());
       if (!action) throw new ComputerError('ACTION_UNAVAILABLE: choose an action label from the latest element.');
-      await mutate(a.window, { type: 'ui_action', ref: ref.ref, action });
+      const nativeAction: Action = { type: 'ui_action', ref: ref.ref, action };
+      if (a.capture_after) return mutateAndCapture(a.window, nativeAction, { window: a.window.id, app: a.window.app });
+      await mutate(a.window, nativeAction, undefined, false);
     },
     async activate_window(input: unknown): Promise<void> {
       const a = parse('activate_window', input); await mutate(a.window, { type: 'focus', window: a.window.id });

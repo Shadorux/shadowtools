@@ -40,7 +40,7 @@ import {
 } from '../sandbox.js';
 import { currentWorkspace, learnWorkspace, setCurrentWorkspace } from '../workspace.js';
 import { getSessionProject } from '../projects.js';
-import { firstTaskRoot, resolveLinkedSkillAlias } from '../skill-access.js';
+import { firstTaskRoot } from '../skill-access.js';
 import { ExecError } from '../exec.js';
 import { ComputerError } from '../computer/index.js';
 import { getConfig } from '../config.js';
@@ -1076,12 +1076,10 @@ export async function resolveIn(
   // `/elsewhere`, and nothing downstream can tell it apart from a path that was always that.
   const workspace = await validatedWorkspace();
   const base = options.base !== undefined ? options.base : (workspace?.virtual ?? null);
-  const resolveOptions = {
+  const resolved = await resolvePath(roots, requested, {
     ...(options.allowMissing === undefined ? {} : { allowMissing: options.allowMissing }),
     base
-  };
-  const resolved = await resolveLinkedSkillAlias(roots, requested, resolveOptions) ??
-    await resolvePath(roots, requested, resolveOptions);
+  });
   // Absolute only: a workspace learned from a relative path would let one loose resolution
   // decide where the next loose resolution points. See workspace.ts.
   if (isAbsoluteVirtualPath(requested) || isNativeWindowsPath(requested)) await learnWorkspace(resolved);
@@ -1251,9 +1249,18 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
         inputSchema: toolSchema(config.inputSchema),
         ...(config.outputSchema ? { outputSchema: toolSchema(config.outputSchema) } : {})
       }, ((args: never, mcpCtx?: McpCallContext) =>
-        dispatch(name, args, mcpCtx?.sessionId ?? null, requestIdOf(mcpCtx), surface, () =>
-          handler(args)
-        )) as never);
+        dispatch(name, args, mcpCtx?.sessionId ?? null, requestIdOf(mcpCtx), surface, async () => {
+          // The SDK normally validates Standard Schema before invoking us, but keep the
+          // direct MCP path on the exact same parser as nested/code-mode calls. This also
+          // prevents a stale client-side tool schema from silently dropping newly added
+          // optional fields before the live handler sees them.
+          const parsed = await config.inputSchema.safeParseAsync(args);
+          if (parsed.success) return handler(parsed.data);
+          const details = parsed.error.issues.slice(0, 3).map(issue =>
+            `${issue.path.map(String).join('.').slice(0, 80) || 'arguments'}: ${issue.message.slice(0, 300)}`
+          ).join('; ');
+          return fail(`INVALID_ARGUMENTS: ${details}`);
+        })) as never);
     },
     guarded(cap, name, fn) {
       return guard(name, async () => {

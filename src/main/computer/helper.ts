@@ -32,6 +32,7 @@ $ProgressPreference = 'SilentlyContinue'
 # takes — type, set_value, UIA queries — not only keystrokes.
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 
@@ -41,6 +42,8 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Windows.Forms;
 
 public static class Clf {
   [StructLayout(LayoutKind.Sequential)]
@@ -129,10 +132,39 @@ public static class Clf {
 
   // SendInput takes absolute coordinates normalised to 0..65535 across the whole
   // virtual desktop, not pixels, so every monitor layout works with one formula.
-  public static void Move(int x, int y) {
+  static void MoveImmediate(int x, int y) {
     int nx = (int)(((double)(x - VX) * 65535.0) / Math.Max(1, VW - 1));
     int ny = (int)(((double)(y - VY) * 65535.0) / Math.Max(1, VH - 1));
     Send(new INPUT[] { Mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny, 0) });
+  }
+
+  // The low-level public primitive stays one SendInput call; failure-recovery tests and drag
+  // setup depend on that atomic shape. Model-facing routes opt into MoveVisible below.
+  public static void Move(int x, int y) { MoveImmediate(x, y); }
+
+  // Human-visible pointer motion makes model-driven desktop control much easier to follow.
+  // Keep the duration bounded so it remains responsive, and use the immediate primitive from
+  // drag interpolation so nested smoothing cannot stretch a drag into seconds.
+  public static void MoveVisible(int x, int y) {
+    POINT start;
+    if (!GetCursorPos(out start)) { MoveImmediate(x, y); CursorGlow.ShowAt(x, y, false); return; }
+    double dx = x - (double)start.X, dy = y - (double)start.Y;
+    double distance = Math.Sqrt(dx * dx + dy * dy);
+    if (distance < 4) { MoveImmediate(x, y); CursorGlow.ShowAt(x, y, false); return; }
+    int durationMs = Math.Min(180, Math.Max(70, (int)Math.Round(70 + distance / 12.0)));
+    int steps = Math.Min(18, Math.Max(5, (int)Math.Ceiling(durationMs / 12.0)));
+    var clock = System.Diagnostics.Stopwatch.StartNew();
+    for (int step = 1; step <= steps; step++) {
+      double t = step / (double)steps;
+      // Smoothstep: gentle departure/arrival without the floaty overshoot of a spring curve.
+      double eased = t * t * (3.0 - 2.0 * t);
+      int px = (int)Math.Round(start.X + dx * eased);
+      int py = (int)Math.Round(start.Y + dy * eased);
+      MoveImmediate(px, py);
+      CursorGlow.ShowAt(px, py, false);
+      int remaining = (int)Math.Ceiling((double)durationMs * step / steps - clock.ElapsedMilliseconds);
+      if (remaining > 0) Thread.Sleep(Math.Min(12, remaining));
+    }
   }
 
   /**
@@ -172,7 +204,7 @@ public static class Clf {
 
   public static void Click(int x, int y, string button, int times) {
     if (times < 1 || times > 3) throw new ArgumentException("BAD_ACTION: click count must be between 1 and 3");
-    Move(x, y);
+    MoveImmediate(x, y);
     uint down, up;
     ButtonFlags(button, out down, out up);
     List<INPUT> batch = new List<INPUT>();
@@ -186,6 +218,12 @@ public static class Clf {
       try { Send(new INPUT[] { Mouse(up, 0, 0, 0) }); } catch { }
       throw;
     }
+    CursorGlow.ShowAt(x, y, true);
+  }
+
+  public static void ClickVisible(int x, int y, string button, int times) {
+    MoveVisible(x, y);
+    Click(x, y, button, times);
   }
 
   public static void Scroll(int x, int y, int dx, int dy) {
@@ -193,7 +231,7 @@ public static class Clf {
   }
 
   public static void Scroll(int x, int y, int dx, int dy, bool rawWheel) {
-    Move(x, y);
+    MoveImmediate(x, y);
     List<INPUT> batch = new List<INPUT>();
     // Positive scroll_y means "scroll down" for the caller; the wheel API is the
     // other way round, hence the negation.
@@ -203,11 +241,24 @@ public static class Clf {
     if (batch.Count > 0) Send(batch.ToArray());
   }
 
+  public static void ScrollVisible(int x, int y, int dx, int dy, bool rawWheel) {
+    MoveVisible(x, y);
+    Scroll(x, y, dx, dy, rawWheel);
+  }
+
   public static void Drag(int[] xs, int[] ys, string button) {
     Drag(xs, ys, button, 350);
   }
 
   public static void Drag(int[] xs, int[] ys, string button, int durationMs) {
+    DragCore(xs, ys, button, durationMs, false);
+  }
+
+  public static void DragVisible(int[] xs, int[] ys, string button, int durationMs) {
+    DragCore(xs, ys, button, durationMs, true);
+  }
+
+  static void DragCore(int[] xs, int[] ys, string button, int durationMs, bool visible) {
     if (xs == null || ys == null || xs.Length != ys.Length || xs.Length < 2 || xs.Length > 64 || durationMs < 50 || durationMs > 2000)
       throw new ArgumentException("BAD_ACTION: drag requires 2-64 points and a 50-2000 ms duration");
     double[] distance = new double[xs.Length];
@@ -217,7 +268,9 @@ public static class Clf {
     }
     uint down, up;
     ButtonFlags(button, out down, out up);
-    Move(xs[0], ys[0]);
+    // Keep drag setup atomic: one pointer placement precedes button-down, then the
+    // existing timed path owns all visible interpolation while the button is held.
+    MoveImmediate(xs[0], ys[0]);
     try {
       Send(new INPUT[] { Mouse(down, 0, 0, 0) });
       int steps = Math.Min(256, Math.Max(2, (int)Math.Ceiling(durationMs / 10.0)));
@@ -230,12 +283,14 @@ public static class Clf {
         double fraction = length <= 0 ? 1 : (at - distance[segment - 1]) / length;
         int x = (int)Math.Round(xs[segment - 1] + (xs[segment] - (double)xs[segment - 1]) * fraction);
         int y = (int)Math.Round(ys[segment - 1] + (ys[segment] - (double)ys[segment - 1]) * fraction);
-        Move(x, y);
+        MoveImmediate(x, y);
+        if (visible) CursorGlow.ShowAt(x, y, false);
         int remaining = (int)Math.Ceiling((double)durationMs * step / steps - clock.ElapsedMilliseconds);
         if (remaining > 0) System.Threading.Thread.Sleep(Math.Min(10, remaining));
       }
     } finally {
       Send(new INPUT[] { Mouse(up, 0, 0, 0) });
+      if (visible) CursorGlow.ShowAt(xs[xs.Length - 1], ys[ys.Length - 1], true);
     }
   }
 
@@ -517,10 +572,150 @@ public static class Clf {
     }
   }
 
+  public static string FrameHash(int x, int y, int w, int h, int sample) {
+    sample = Math.Max(8, Math.Min(32, sample));
+    using (Bitmap shot = new Bitmap(w, h))
+    using (Graphics g = Graphics.FromImage(shot))
+    using (Bitmap tiny = new Bitmap(sample, sample))
+    using (Graphics gt = Graphics.FromImage(tiny)) {
+      g.CopyFromScreen(x, y, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
+      gt.DrawImage(shot, new Rectangle(0, 0, sample, sample));
+      long sum = 0;
+      byte[] lum = new byte[sample * sample];
+      int at = 0;
+      for (int yy = 0; yy < sample; yy++) for (int xx = 0; xx < sample; xx++) {
+        Color c = tiny.GetPixel(xx, yy);
+        byte l = (byte)((c.R * 299 + c.G * 587 + c.B * 114) / 1000);
+        lum[at++] = l; sum += l;
+      }
+      int avg = (int)(sum / lum.Length);
+      StringBuilder hex = new StringBuilder((lum.Length + 3) / 4);
+      for (int i = 0; i < lum.Length; i += 4) {
+        int nibble = 0;
+        for (int bit = 0; bit < 4 && i + bit < lum.Length; bit++)
+          if (lum[i + bit] >= avg) nibble |= 1 << bit;
+        hex.Append(nibble.ToString("x1"));
+      }
+      return hex.ToString();
+    }
+  }
+
+}
+
+// A click-through, no-activate halo that exists only while the desktop helper is alive.
+// It never replaces the user's system cursor, so an app/helper crash cannot strand Windows
+// with a modified cursor scheme. The native pointer remains the actual input owner; this is a
+// visual projection of its current position for the person watching model-driven control.
+public static class CursorGlow {
+  sealed class GlowForm : Form {
+    readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+    DateTime hideAt = DateTime.MinValue;
+    DateTime pulseUntil = DateTime.MinValue;
+
+    public GlowForm() {
+      FormBorderStyle = FormBorderStyle.None;
+      ShowInTaskbar = false;
+      TopMost = true;
+      StartPosition = FormStartPosition.Manual;
+      // A dark key keeps anti-aliased edge pixels crimson instead of blending toward
+      // bright magenta/pink before Windows applies the color-key transparency.
+      BackColor = Color.FromArgb(1, 1, 1);
+      TransparencyKey = Color.FromArgb(1, 1, 1);
+      Width = Height = 58;
+      timer.Interval = 30;
+      timer.Tick += delegate {
+        if (DateTime.UtcNow >= hideAt) { Hide(); timer.Stop(); return; }
+        Invalidate();
+      };
+    }
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override CreateParams CreateParams {
+      get {
+        CreateParams cp = base.CreateParams;
+        cp.ExStyle |= 0x20 | 0x80 | 0x08000000; // transparent, toolwindow, noactivate
+        return cp;
+      }
+    }
+
+    public void Place(int x, int y, bool pulse) {
+      Left = x - Width / 2;
+      Top = y - Height / 2;
+      hideAt = DateTime.UtcNow.AddMilliseconds(pulse ? 520 : 360);
+      if (pulse) pulseUntil = DateTime.UtcNow.AddMilliseconds(180);
+      if (!Visible) Show();
+      timer.Start();
+      Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e) {
+      base.OnPaint(e);
+      e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+      bool pulse = DateTime.UtcNow < pulseUntil;
+      float center = Width / 2f;
+      float[] sizes = pulse ? new float[] { 44f, 34f, 24f } : new float[] { 36f, 27f, 19f };
+      Color[] colors = new Color[] {
+        Color.FromArgb(70, 255, 24, 24),
+        Color.FromArgb(130, 255, 20, 20),
+        Color.FromArgb(225, 255, 42, 42)
+      };
+      for (int i = 0; i < sizes.Length; i++) {
+        float s = sizes[i];
+        using (Pen pen = new Pen(colors[i], i == 2 ? 2.2f : 3.2f))
+          e.Graphics.DrawEllipse(pen, center - s / 2, center - s / 2, s, s);
+      }
+    }
+  }
+
+  static readonly object Gate = new object();
+  static GlowForm form;
+  static ManualResetEvent ready;
+
+  static GlowForm Ensure() {
+    lock (Gate) {
+      if (form != null && !form.IsDisposed) return form;
+      ready = new ManualResetEvent(false);
+      Thread thread = new Thread(delegate() {
+        try {
+          GlowForm created = new GlowForm();
+          lock (Gate) form = created;
+          ready.Set();
+          Application.Run(created);
+        } catch { ready.Set(); }
+      });
+      thread.IsBackground = true;
+      thread.SetApartmentState(ApartmentState.STA);
+      thread.Start();
+    }
+    ready.WaitOne(500);
+    lock (Gate) return form;
+  }
+
+  public static void ShowAt(int x, int y, bool pulse) {
+    try {
+      GlowForm current = Ensure();
+      if (current == null || current.IsDisposed) return;
+      if (current.InvokeRequired) current.BeginInvoke(new Action<int,int,bool>(current.Place), x, y, pulse);
+      else current.Place(x, y, pulse);
+    } catch { }
+  }
+
+  // Screen captures are model observations, not user-facing recordings. Keep the
+  // assistant's own crimson pointer out of those pixels without adding a settle delay.
+  public static void HideForCapture() {
+    try {
+      GlowForm current;
+      lock (Gate) current = form;
+      if (current == null || current.IsDisposed) return;
+      Action hide = delegate { current.Hide(); };
+      if (current.InvokeRequired) current.Invoke(hide);
+      else hide();
+    } catch { }
+  }
 }
 ${WINDOWS_KEYS_SOURCE}
 ${WINDOWS_APP_IDENTITY_SOURCE}
-'@ -ReferencedAssemblies System.Drawing
+'@ -ReferencedAssemblies System.Drawing,System.Windows.Forms
 
 ${WINDOWS_CAPTURE_BOOTSTRAP}
 
@@ -803,7 +998,7 @@ function Act-UiElement($request) {
       $r = $element.Current.BoundingRectangle
       if ($r.Width -le 0 -or $r.Height -le 0) { throw "UI_ELEMENT_OFFSCREEN: the referenced element has no clickable bounds" }
       Assert-InputOwner $id $request.ownerWindow $request.targetApp $request.ownerApp
-      [Clf]::Click([int][Math]::Round($r.X + $r.Width / 2), [int][Math]::Round($r.Y + $r.Height / 2), $button, $count)
+      [Clf]::ClickVisible([int][Math]::Round($r.X + $r.Width / 2), [int][Math]::Round($r.Y + $r.Height / 2), $button, $count)
       $route = 'sendinput'
     }
   } else {
@@ -970,6 +1165,7 @@ function Find-UiElements($request) {
 }
 
 function Capture-Target($request, [Nullable[int64]]$forcedWindow) {
+  [CursorGlow]::HideForCapture()
   $screen = Get-ScreenRect
   $id = if ($null -ne $forcedWindow) { [int64]$forcedWindow } elseif ($request.id) { [int64]$request.id } else { $null }
   $mode = 'screen'
@@ -1138,6 +1334,15 @@ function Handle-Request($request) {
       $capture = Capture-Target $request $null
       foreach ($key in $capture.Keys) { $result[$key] = $capture[$key] }
     }
+    'framehash' {
+      [CursorGlow]::HideForCapture()
+      $id = if ($request.id) { [int64]$request.id } else { [Clf]::ForegroundId() }
+      $window = Get-WindowRow $id
+      if ($null -eq $window) { throw "WINDOW_NOT_FOUND: no matching visible window is available" }
+      $sample = if ($request.sample) { [int]$request.sample } else { 16 }
+      $result.window = $window
+      $result.hash = [Clf]::FrameHash([int]$window.x, [int]$window.y, [int]$window.width, [int]$window.height, $sample)
+    }
     'snapshot' {
       $id = if ($request.id) { [int64]$request.id } else { [Clf]::ForegroundId() }
       $window = Get-WindowRow $id
@@ -1250,11 +1455,11 @@ function Handle-Request($request) {
               $launches += Launch-WindowsApp @{ app = $a.app }
               $routes += 'shell'
             }
-            'move'         { [Clf]::Move([int]$a.x, [int]$a.y); $routes += 'sendinput' }
-            'click'        { [Clf]::Click([int]$a.x, [int]$a.y, $a.button, (Get-RequestedClickCount $a)); $routes += 'sendinput' }
-            'double_click' { [Clf]::Click([int]$a.x, [int]$a.y, $a.button, 2); $routes += 'sendinput' }
-            'scroll'       { [Clf]::Scroll([int]$a.x, [int]$a.y, [int]$a.scroll_x, [int]$a.scroll_y, [bool]$a.rawWheel); $routes += 'sendinput' }
-            'drag'         { $duration = if ($null -ne $a.durationMs) { [int]$a.durationMs } else { 350 }; [Clf]::Drag([int[]]$a.xs, [int[]]$a.ys, $a.button, $duration); $routes += 'sendinput' }
+            'move'         { [Clf]::MoveVisible([int]$a.x, [int]$a.y); $routes += 'sendinput' }
+            'click'        { [Clf]::ClickVisible([int]$a.x, [int]$a.y, $a.button, (Get-RequestedClickCount $a)); $routes += 'sendinput' }
+            'double_click' { [Clf]::ClickVisible([int]$a.x, [int]$a.y, $a.button, 2); $routes += 'sendinput' }
+            'scroll'       { [Clf]::ScrollVisible([int]$a.x, [int]$a.y, [int]$a.scroll_x, [int]$a.scroll_y, [bool]$a.rawWheel); $routes += 'sendinput' }
+            'drag'         { $duration = if ($null -ne $a.durationMs) { [int]$a.durationMs } else { 350 }; [Clf]::DragVisible([int[]]$a.xs, [int[]]$a.ys, $a.button, $duration); $routes += 'sendinput' }
             'type'         { [Clf]::Type([string]$a.text); $routes += 'sendinput' }
             'keypress'     { [Clf]::Press([int[]]$a.resolvedKeys); $routes += 'sendinput' }
             'focus'        { Assert-Focused ([int64]$a.window); Assert-InputOwner ([int64]$a.window) $request.ownerWindow $request.targetApp $request.ownerApp; $routes += 'focus' }
@@ -1278,6 +1483,13 @@ function Handle-Request($request) {
             launches = @($launches)
           }
         }
+      }
+      if ($request.detectChangeWindow) {
+        [CursorGlow]::HideForCapture()
+        $hashWindow = Get-WindowRow ([int64]$request.detectChangeWindow)
+        if ($null -eq $hashWindow) { throw "WINDOW_NOT_FOUND: no matching visible window is available" }
+        $sample = if ($request.detectChangeSample) { [int]$request.detectChangeSample } else { 16 }
+        $result.afterHash = [Clf]::FrameHash([int]$hashWindow.x, [int]$hashWindow.y, [int]$hashWindow.width, [int]$hashWindow.height, $sample)
       }
       $cursor = [Clf]::Cursor() -split ','
       $result.cursor = @{ x = [int]$cursor[0]; y = [int]$cursor[1] }

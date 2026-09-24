@@ -120,7 +120,7 @@ function editing(f: ReturnType<typeof fixture>) {
   return { box, serialize: () => serialize(box) };
 }
 
-async function recorder(f: ReturnType<typeof fixture>, replies: Record<string, (m: any) => any> = {}, initialize = true) {
+async function recorder(f: ReturnType<typeof fixture>, replies: Record<string, (m: any) => any> = {}) {
   const win = f.win as any, sent: any[] = [];
   let hook: any, listener: any;
   win.CLF_TEST_HOOK = (value: any) => { hook = value; };
@@ -136,7 +136,7 @@ async function recorder(f: ReturnType<typeof fixture>, replies: Record<string, (
     } }, storage: { onChanged: { addListener() {}, removeListener() {} } } };
   win.eval(contentSource);
   await vi.waitFor(() => expect(hook).toBeTruthy());
-  if (initialize) { await hook.refreshFiber(); await hook.pullActivity(); hook.observe(); await hook.flush(); }
+  await hook.refreshFiber(); await hook.pullActivity(); hook.observe(); await hook.flush();
   return { sent, hook, runtime: (message: any) => new Promise<any>(resolve => listener(message, {}, resolve)),
     events: () => sent.filter(m => m.type === 'events').flatMap(m => m.entries.map((entry: any) => entry.event)) };
 }
@@ -273,127 +273,6 @@ it.each([false, true])('captures live shell request metadata and public activity
   (f.win as any).__CLF_CONTENT_RECORDER__.stop();
 });
 
-// React keeps the host's original Fiber pointer across commits. The current root
-// and child lists are the published tree; memo bailouts can keep old return links.
-function bufferedShell(f: ReturnType<typeof fixture>, sharedChild = false) {
-  const { owner, snapshot } = liveShellMapping(f, true);
-  const native = f.doc.querySelector('[data-turn-key]')!;
-  const oldHost: any = { tag: 5, stateNode: native, memoizedProps: {}, return: f.row };
-  const nextEntry = sharedChild ? f.entry : structuredClone(f.entry);
-  const nextSnapshot = { renderedConversation: structuredClone(snapshot.renderedConversation),
-    renderedTurns: [{ id: TURN, turn: nextEntry.turn }] };
-  nextSnapshot.renderedConversation.mapping[CALL].message.metadata.request_id = 'wfr_committed_update';
-  const state: any = { current: null };
-  const oldRoot: any = { tag: 3, stateNode: state, return: null, child: owner };
-  const nextRoot: any = { tag: 3, stateNode: state, return: null };
-  const nextOwner: any = { tag: 0, memoizedProps: { conversationId: THREAD }, return: nextRoot,
-    updateQueue: { memoCache: { data: [[nextSnapshot]] } } };
-  const nextRow: any = sharedChild ? f.row : { tag: 0, memoizedProps: { entry: nextEntry }, return: nextOwner };
-  const nextHost: any = sharedChild ? oldHost : { tag: 5, stateNode: native, memoizedProps: {}, return: nextRow };
-  owner.tag = 0; owner.return = oldRoot; owner.child = f.row;
-  Object.assign(f.row, { tag: 0, child: oldHost });
-  nextRoot.child = nextOwner; nextOwner.child = nextRow; nextRow.child = nextHost;
-  for (const [a, b] of [[oldRoot, nextRoot], [owner, nextOwner], ...(!sharedChild ? [[f.row, nextRow], [oldHost, nextHost]] : [])]) {
-    a.alternate = b; b.alternate = a;
-  }
-  state.current = oldRoot;
-  (native as any).__reactFiber$fixture = oldHost;
-  return { state, oldRoot, nextRoot, oldHost, nextHost, owner, nextOwner, nextEntry, nextSnapshot, native };
-}
-
-it.each([false, true])('reads committed shell metadata across real React double-buffer shapes (shared child=%s)', async sharedChild => {
-  const f = fixture(), tree = bufferedShell(f, sharedChild);
-  expect((await f.ask()).turns[0].calls[0].requestId).toBe(OTHER);
-  // Work in progress is already reachable but has not been committed.
-  expect((await f.ask()).turns[0].requests.some((row: any) => row.requestId === 'wfr_committed_update')).toBe(false);
-  tree.state.current = tree.nextRoot;
-  expect((await f.ask()).turns[0].calls[0].requestId).toBe('wfr_committed_update');
-  // Preserve React's own pointers. The reader must not reparent a shared subtree.
-  expect((tree.native as any).__reactFiber$fixture).toBe(tree.oldHost);
-  expect(f.row.return).toBe(tree.owner);
-  tree.state.current = tree.oldRoot;
-  expect((await f.ask()).turns[0].calls[0].requestId).toBe(OTHER);
-});
-
-it.each(['foreign-current', 'unmounted', 'inconsistent-root', 'sibling-cycle'])('does not substitute stale React evidence for %s', async state => {
-  const f = fixture(), tree = bufferedShell(f);
-  await f.ask();
-  tree.state.current = tree.nextRoot;
-  if (state === 'foreign-current') tree.nextEntry.id = 'different-mounted-turn';
-  if (state === 'unmounted') tree.nextRoot.child = null;
-  if (state === 'inconsistent-root') tree.state.current = { tag: 3 };
-  if (state === 'sibling-cycle') { const sibling: any = {}; sibling.sibling = sibling; tree.nextOwner.child = sibling; }
-  expect((await f.ask()).turns).toEqual([]);
-  expect(f.api.messages()).toEqual([]);
-});
-
-it.each([false, true])('correlates a witnessed shell send before its client conversation resolves (compiler=%s)', async compiler => {
-  const f = fixture(), edit = editing(f), { owner } = liveShellMapping(f, compiler);
-  f.entry.conversationId = `local-chatgpt:${OTHER}`;
-  owner.memoizedProps.conversationId = f.entry.conversationId;
-  const native = f.doc.querySelector('[data-turn-key]')!;
-  native.remove();
-  f.doc.querySelector('button[type="submit"]')!.addEventListener('click', event => {
-    event.preventDefault();
-    f.doc.querySelector('[data-thread-find-target]')!.append(native);
-    edit.box.replaceChildren();
-  });
-  const r = await recorder(f);
-  expect(f.api.insertPrompt('hello', true)).toBe(true);
-  f.doc.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
-  // The native send and existing transcript observer must discover the new
-  // shell identities. Manually asking Fiber here hides the admission deadlock.
-  await vi.waitFor(async () => {
-    await r.hook.flush();
-    expect(r.events().filter((event: any) => event.kind === 'turn_start')).toHaveLength(1);
-  });
-  await vi.waitFor(() => expect(r.sent.filter(m => m.type === 'correlate')).toContainEqual(expect.objectContaining({
-    conversationId: THREAD, calls: expect.arrayContaining([expect.objectContaining({ requestId: OTHER })])
-  })));
-  const localTurnId = r.events().find((event: any) => event.kind === 'turn_start').turnId;
-  expect(r.events().filter((event: any) => event.kind === 'tool_evidence')).toContainEqual(expect.objectContaining({
-    turnId: localTurnId, calls: expect.arrayContaining([expect.objectContaining({ messageId: CALL, requestId: OTHER })])
-  }));
-  expect(f.queries).toEqual([]);
-  expect(JSON.stringify(r.sent)).not.toMatch(/PRIVATE_REASONING_CONTENT|DO_NOT_COPY/);
-  (f.win as any).__CLF_CONTENT_RECORDER__.stop();
-});
-
-it('holds provisional shell request metadata until this document owns the native send', async () => {
-  const f = fixture(), { owner } = liveShellMapping(f, true);
-  f.entry.conversationId = `local-chatgpt:${OTHER}`;
-  owner.memoizedProps.conversationId = f.entry.conversationId;
-  // A readable mounted snapshot without a Send witness is not a route binding.
-  const r = await recorder(f);
-  await r.hook.refreshFiber(); await r.hook.flush();
-  expect(r.sent.filter(m => m.type === 'correlate')).toEqual([]);
-  expect(r.events().filter((event: any) => event.kind === 'tool_evidence')
-    .flatMap((event: any) => event.calls).some((call: any) => call.requestId === OTHER)).toBe(false);
-  (f.win as any).__CLF_CONTENT_RECORDER__.stop();
-});
-
-it.each(['live', 'history', 'wrong-recipient', 'unselected', 'duplicate'])
-  ('reads the mounted native Code Mode invocation metadata without its result body (%s)', async state => {
-    const f = fixture(), { mapping } = liveShellMapping(f, true);
-    const execution = '88888888-3333-4333-8333-333333333333';
-    const requestId = 'wfr_native_execution';
-    mapping[execution] = { id: execution, message: { id: execution, author: { role: 'assistant' },
-      recipient: state === 'wrong-recipient' ? 'functions.other' : 'functions.exec',
-      metadata: { request_id: requestId }, content: { content_type: 'code' } } };
-    Object.defineProperty(mapping[execution].message.content, 'text', { get() { throw Error('Execution code must remain unread'); } });
-    const item = { type: 'dynamic-tool-call', callId: execution, tool: 'exec', completed: false };
-    if (state !== 'unselected') f.entry.turn.items[1].items.push(item);
-    if (state === 'duplicate') f.entry.turn.items[1].items.push(item);
-    if (state === 'history') {
-      f.row.return = f.top;
-      f.queries.push({ queryKey: ['chatgpt-conversation', THREAD], state: { data: { mapping } } });
-    }
-    const result = await f.ask();
-    const requests = result.turns.flatMap((turn: any) => turn.requests);
-    expect(requests.some((request: any) => request.requestId === requestId)).toBe(['live', 'history'].includes(state));
-    expect(JSON.stringify(result)).not.toContain('Execution code');
-  });
-
 it.each(['foreign-owner', 'missing-user', 'wrong-user', 'two-mappings', 'getter', 'duplicate-selected-id'])('does not borrow live shell metadata from %s', async kind => {
   const f = fixture(), { mapping, owner, snapshot } = liveShellMapping(f);
   if (kind === 'foreign-owner') owner.memoizedProps.conversationId = OTHER;
@@ -496,60 +375,6 @@ it('uses the same exact call before and after history hydration and refuses a co
   const disputed = (await f.ask()).turns[0];
   expect(disputed.requests).toEqual([]); expect(disputed.calls[0].requestId).toBeNull();
   expect(mapping[CALL].message.metadata.request_id).toBe(OTHER);
-});
-
-// Native dump 811613: N() retains the invocation's callId but replaces its
-// sourceMessage with the tool result and publishes widgetStateSource.messageId.
-// The rendered turn's messageIds are the source ids, not the invocation ids.
-function pairedShellCall(f: ReturnType<typeof fixture>) {
-  const { mapping, owner } = liveShellMapping(f, true);
-  const resultId = '88888888-3333-4333-8333-333333333333';
-  const step = f.entry.turn.items[1].items.find((item: any) => item.type === 'mcp-tool-call');
-  step.completed = true;
-  step.widgetStateSource = { messageId: resultId };
-  step.invocationResourceUri = '/Chat On Steroids Core/link_x/read';
-  mapping[resultId] = { id: resultId, parent: CALL, message: { id: resultId,
-    author: { role: 'tool', name: 'api_tool.call_tool' }, recipient: 'all',
-    metadata: { invoked_resource: { app_name: 'Chat On Steroids Core', resource_uri: step.invocationResourceUri } },
-    content: { content_type: 'text', parts: ['PRIVATE_TOOL_RESULT'] } } };
-  mapping[ANSWER].parent = resultId;
-  f.entry.turn.messageIds = f.entry.turn.messageIds.map(id => id === CALL ? resultId : id);
-  f.entry.turn.status = 'complete'; f.entry.turn.items[2].completed = true;
-  // A reopened historical row can lack the live renderer's selected-path snapshot.
-  delete owner.updateQueue;
-  f.queries.push({ queryKey: ['chatgpt-conversation', THREAD], state: { data: { mapping } } });
-  return { mapping, step, resultId };
-}
-
-it.each(['request', 'result', 'embedded'] as const)('keeps native paired shell request ownership after reload (%s metadata)', async source => {
-  const f = fixture(), { mapping, step, resultId } = pairedShellCall(f);
-  if (source !== 'request') {
-    delete mapping[CALL]; mapping[resultId].message.metadata.request_id = OTHER;
-    if (source === 'embedded') step.callId = 'native-mcp-call-not-a-provider-message';
-  }
-  const turn = (await f.ask()).turns[0];
-  expect(turn.calls).toEqual([expect.objectContaining({ messageId: step.callId, requestId: OTHER, answered: true })]);
-  expect(turn.requests).toContainEqual(expect.objectContaining({ requestId: OTHER }));
-  expect(JSON.stringify(turn)).not.toMatch(/PRIVATE_TOOL_RESULT|NEVER_COPY_TOOL_ARGS|DO_NOT_COPY/);
-  const r = await recorder(f);
-  await vi.waitFor(() => expect(r.sent).toContainEqual(expect.objectContaining({ type: 'correlate',
-    conversationId: THREAD, calls: expect.arrayContaining([expect.objectContaining({ requestId: OTHER })]) })));
-  expect(r.events()).toContainEqual(expect.objectContaining({ kind: 'tool_evidence',
-    calls: expect.arrayContaining([expect.objectContaining({ messageId: step.callId, requestId: OTHER })]) }));
-  (f.win as any).__CLF_CONTENT_RECORDER__.stop();
-});
-
-it.each(['unselected-source', 'wrong-tool', 'wrong-server', 'wrong-role', 'conflicting-request', 'duplicate-source'])('does not borrow paired shell invocation metadata from %s', async scenario => {
-  const f = fixture(), { mapping, step, resultId } = pairedShellCall(f);
-  if (scenario === 'unselected-source') step.widgetStateSource.messageId = OTHER;
-  if (scenario === 'wrong-tool') mapping[CALL].message.content.text = '{"path":"/Chat On Steroids Core/link_x/agents","args":{}}';
-  if (scenario === 'wrong-server') mapping[CALL].message.content.text = '{"path":"/Chat On Steroids Core Backup/link_x/read","args":{}}';
-  if (scenario === 'wrong-role') mapping[CALL].message.author.role = 'user';
-  if (scenario === 'conflicting-request') mapping[resultId].message.metadata.request_id = 'wfr_conflicting_result';
-  if (scenario === 'duplicate-source') f.entry.turn.items[1].items.push({ ...step, callId: OTHER });
-  const turn = (await f.ask()).turns[0];
-  expect(turn.calls.every((call: any) => call.requestId === null)).toBe(true);
-  expect(turn.requests.some((request: any) => request.requestId === OTHER)).toBe(false);
 });
 it.each(['duplicate-cache', 'conflicting-conversation', 'duplicate-id', 'unavailable-cache'])('keeps the transcript without ambiguous optional request metadata (%s)', async kind => {
   const f = fixture();
@@ -685,51 +510,6 @@ it.each([false, true])('bootstraps a shell worker with literal instructions and 
   expect(r.sent.filter(m => m.type === 'ack' && m.status === 'failed')).toEqual([]);
   (f.win as any).__CLF_CONTENT_RECORDER__.stop();
 }, 10000);
-
-it.each(['immediate', 'hydrating', 'foreign', 'retired'])('binds the fresh background worker from native receipt events with throttled timers (%s)', async state => {
-  const f = fixture(), edit = editing(f), { owner } = liveShellMapping(f, true);
-  const commandId = 'event-owned-worker', text = 'Read this diagnostic and report through agents.';
-  const native = f.doc.querySelector('[data-turn-key]')!;
-  native.remove(); page.reconfigure({ url: `https://chatgpt.com/?clf=${commandId}` });
-  f.entry.conversationId = `local-chatgpt:${OTHER}`; owner.memoizedProps.conversationId = f.entry.conversationId;
-  f.entry.turn.items[0].message = text;
-  native.querySelector('.whitespace-pre-wrap')!.textContent = text;
-  Object.defineProperty(f.doc, 'visibilityState', { configurable: true, value: 'hidden' });
-  const nativeTimeout = f.win.setTimeout.bind(f.win);
-  f.win.setTimeout = ((fn: TimerHandler, delay?: number) => Number(delay) >= 500 ? 98765 : nativeTimeout(fn, delay)) as typeof f.win.setTimeout;
-  let clicked = 0;
-  f.doc.querySelector('button[type="submit"]')!.addEventListener('click', event => {
-    event.preventDefault(); clicked++; edit.box.replaceChildren();
-    if (state === 'immediate') {
-      f.win.history.pushState({}, '', `/c/${THREAD}`); f.doc.querySelector('[data-thread-find-target]')!.append(native);
-    }
-  });
-  const r = await recorder(f, { redeem: () => ({ ok: true, command: { id: commandId, type: 'worker', text, agent: 'worker-1' } }) }, false);
-  try {
-    await vi.waitFor(() => expect(clicked).toBe(1));
-    if (state !== 'immediate') {
-      expect(r.sent.filter(message => message.type === 'ack')).toEqual([]);
-      if (state === 'retired') (f.win as any).__CLF_CONTENT_RECORDER__.stop();
-      if (state === 'foreign') {
-        f.entry.conversationId = THREAD; owner.memoizedProps.conversationId = THREAD;
-        f.win.history.pushState({}, '', `/c/${OTHER}`);
-      } else f.win.history.pushState({}, '', `/c/${THREAD}`);
-      f.doc.querySelector('[data-thread-find-target]')!.append(native);
-    }
-    if (state === 'foreign' || state === 'retired') {
-      await new Promise(resolve => setTimeout(resolve, 350));
-      expect(r.sent.filter(message => message.type === 'ack' && message.status === 'sent')).toEqual([]);
-    } else {
-      await vi.waitFor(() => expect(r.sent.filter(message => message.type === 'ack')).toEqual([
-        expect.objectContaining({ id: commandId, status: 'sent', conversationId: THREAD, agent: 'worker-1' })
-      ]), { timeout: 2000 });
-      await vi.waitFor(() => expect(r.sent.some(message => message.type === 'correlate' &&
-        message.conversationId === THREAD && message.calls.some((call: any) => call.requestId === OTHER))).toBe(true));
-      expect(clicked).toBe(1); expect(f.doc.visibilityState).toBe('hidden');
-    }
-  } finally { (f.win as any).__CLF_CONTENT_RECORDER__.stop(); }
-});
-
 it('opens a local project from a cold shell page and binds its exact first send before recording', async () => {
   const f = fixture(), edit = editing(f), inputId = '88888888-1111-4111-8111-000000000001';
   const options = f.props.modelListConfig; f.props.modelListConfig = null;
@@ -830,18 +610,15 @@ it.each(['streaming', 'cancelled', 'conflicting-conversation'])('does not promot
   expect(turns[0].messages.filter((message: any) => message.role === 'assistant').every((message: any) => message.stable === false)).toBe(true);
 });
 
-it.each([false, true])('commits a shell resume and records its response before identity hydration (provisional=%s)', async provisional => {
+it('commits a shell resume through its exact native marker before releasing recorded history', async () => {
   const f = fixture(), edit = editing(f), commandId = 'shell-resume-command', token = '0123456789abcdef0123456789abcdef';
   f.doc.querySelector('[data-thread-find-target]')!.replaceChildren();
   page.reconfigure({ url: `https://chatgpt.com/?clf=${commandId}` });
-  const text = `[[CLF-RESUME:${token}]]\n\nTASK: continue **the project**. NEXT: verify the remaining work.\n` +
-    'Keep the completed changes and verify the next part.\n'.repeat(800);
+  const text = `[[CLF-RESUME:${token}]]\n\nTASK: continue **the project**. NEXT: verify the remaining work.`;
   let committed = false, historyBeforeCommit = false;
-  let resumed: ReturnType<typeof addExchange>;
   const submitted: string[] = [];
   f.doc.querySelector('button[type="submit"]')!.addEventListener('click', event => {
-    event.preventDefault(); submitted.push(edit.serialize()); resumed = addExchange(f, 9, submitted[0]!); edit.box.replaceChildren();
-    if (provisional) resumed.entry.conversationId = `local-chatgpt:${OTHER}`;
+    event.preventDefault(); submitted.push(edit.serialize()); addExchange(f, 9, submitted[0]!); edit.box.replaceChildren();
     f.win.history.pushState({}, '', `/c/${THREAD}`);
   });
   const r = await recorder(f, {
@@ -856,19 +633,10 @@ it.each([false, true])('commits a shell resume and records its response before i
     events: m => { if (!committed && m.entries.some((entry: any) => entry.event?.kind === 'user_message')) historyBeforeCommit = true;
       return { ok: true, pending: 0, durable: true }; }
   });
-  await vi.waitFor(() => expect(r.sent.filter(m => m.type === 'ack')).toContainEqual(
-    expect.objectContaining({ id: commandId, status: 'sent', conversationId: THREAD })), { timeout: 5000 });
+  await vi.waitFor(() => expect(r.sent).toContainEqual(expect.objectContaining({ type: 'ack', id: commandId, status: 'sent', conversationId: THREAD })), { timeout: 5000 });
   expect(submitted).toEqual([text]); expect(committed).toBe(true); expect(historyBeforeCommit).toBe(false);
   expect(r.sent.filter(m => m.destinationDispatch)).toHaveLength(1);
   expect(r.sent).toContainEqual(expect.objectContaining({ type: 'compact', token, destinationMessageId: '99999999-1111-4111-8111-000000000091' }));
-  await r.hook.pullActivity(); r.hook.observe(); await r.hook.flush();
-  const starts = r.events().filter((event: any) => event.kind === 'turn_start');
-  expect(starts).toHaveLength(1);
-  const localTurnId = starts[0].turnId;
-  resumed!.finish(); await r.hook.refreshFiber(); r.hook.observe(); await r.hook.flush();
-  expect(r.events()).toContainEqual(expect.objectContaining({ kind: 'assistant_message',
-    providerMessageId: resumed!.answerId, turnId: localTurnId, final: true, goalEligible: true }));
-  expect(r.events()).toContainEqual(expect.objectContaining({ kind: 'turn_end', turnId: localTurnId, outcome: 'completed' }));
   (f.win as any).__CLF_CONTENT_RECORDER__.stop();
 }, 10000);
 

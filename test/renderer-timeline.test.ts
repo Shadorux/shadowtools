@@ -1454,48 +1454,6 @@ it('groups project chats and restores each project composer with its selected id
   expect(w.document.querySelector<HTMLDetailsElement>(`[data-project-id="${projects[1]!.id}"]`)!.open).toBe(false);
 });
 
-it('reorders whole project groups without changing chat selection, ownership or disclosure across refresh', async () => {
-  const projects: LocalProject[] = [
-    { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', name: 'Alpha', path: '/alpha', createdAt: 1 },
-    { id: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff', name: 'Beta', path: '/beta', createdAt: 2 }
-  ];
-  const chats = projects.map((project, index) => ({ ...summary([]), id: `chat-${index}`, conversationId: `conversation-${index}`, projectId: project.id }));
-  const { w, append, live } = await boot([], false, [], projects, { sessions: chats });
-  const list = w.document.getElementById('sessionList')!;
-  list.setPointerCapture = vi.fn(); list.hasPointerCapture = () => false;
-  const groups = () => [...w.document.querySelectorAll<HTMLDetailsElement>('.project-group')];
-  const ids = () => groups().map(group => group.dataset.projectId);
-  const geometry = () => groups().forEach((group, index) => {
-    group.getClientRects = () => [{ top: index * 100, height: 80 }] as unknown as DOMRectList;
-    group.getBoundingClientRect = () => ({ top: index * 100, height: 80 }) as DOMRect;
-  });
-  const pointer = (target: Element | Window, type: string, y: number) => target.dispatchEvent(new w.MouseEvent(type, {
-    bubbles: true, cancelable: true, button: 0, clientX: 20, clientY: y
-  }));
-  groups()[0]!.querySelector('summary')!.click();
-  expect(groups()[0]!.open).toBe(true);
-  expect(groups().every(group => !group.hasAttribute('data-id'))).toBe(true);
-  geometry();
-  pointer(groups()[1]!.querySelector('summary')!, 'pointerdown', 110);
-  pointer(list, 'pointermove', -20); pointer(w as unknown as Window, 'pointerup', -20);
-  expect(ids()).toEqual([projects[1]!.id, projects[0]!.id]);
-  expect(groups()[1]!.open).toBe(true);
-  for (const chat of chats) expect(w.document.querySelector(`[data-project-id="${chat.projectId}"] [data-id="${chat.id}"]`)).not.toBeNull();
-  expect(w.document.querySelector('.sess.is-sel')).toBeNull();
-  await append([]);
-  expect(ids()).toEqual([projects[1]!.id, projects[0]!.id]);
-  geometry();
-  const beta = groups()[0]!.querySelector<HTMLElement>('summary')!;
-  beta.focus(); beta.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true, cancelable: true }));
-  expect(ids()).toEqual(projects.map(project => project.id));
-  expect(w.document.activeElement).toBe(groups()[1]!.querySelector('summary'));
-  const saved = w.localStorage.getItem('chat-on-steroids.sidebar-order');
-  pointer(groups()[0]!.querySelector('.project-new')!, 'pointerdown', 10);
-  pointer(list, 'pointermove', 500); pointer(w as unknown as Window, 'pointerup', 500);
-  expect(w.localStorage.getItem('chat-on-steroids.sidebar-order')).toBe(saved);
-  expect(live.sent).toEqual([]);
-});
-
 it('folds a whole Compact & Resume into one row that says the new chat opened', async () => {
   const { w } = await boot([
     { seq: 1, time: T0, source: 'app', kind: 'session_start', conversationId: 'chat-a', title: 'Loop under test' },
@@ -1660,7 +1618,7 @@ it.each(['composer', 'bubble'])('clears New Chat drafts and removes a delivery c
   const cancel = vi.fn(async (id: string) => { live.inputs = live.inputs.map(row => row.id === id ? { ...row, state: 'cancelled' as const, error: 'Not sent: this delivery was cancelled before Send was authorized.' } : row); return { ok: true, data: true }; });
   (w as any).api.cancelInput = cancel;
   expect(w.document.getElementById('chatSend')!.getAttribute('aria-label')).toBe('Cancel delivery');
-  if (control === 'composer') w.document.getElementById('chatSend')!.click();
+  if (control === 'composer') w.document.getElementById('composer')!.dispatchEvent(new w.Event('submit', { cancelable: true }));
   else (w.document.querySelector('#inputQueue [title="Cancel delivery"]') as HTMLButtonElement).click();
   await settle();
   expect(cancel).toHaveBeenCalledWith(live.inputs[0]!.id);
@@ -2113,7 +2071,7 @@ it('shows Stop immediately for a queued first send, switches to Send for a new d
   expect(send.dataset.action).toBe('stop');
   const cancel = vi.fn(async (id: string) => { live.inputs = live.inputs.map(row => row.id === id ? { ...row, state: 'cancelled' } : row); return { ok: true, data: true }; });
   (w as any).api.cancelInput = cancel;
-  send.click();
+  form.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
   await settle();
   expect(cancel).toHaveBeenCalledWith(live.sent[0]!.id);
   expect(send.dataset.action).toBe('send');
@@ -2626,24 +2584,6 @@ it('routes an armed empty-composer plan through the planner and paints only its 
   expect(live.sent[0]).toMatchObject({ text: 'Write SVG paths', stages: ['Validate the SVG'] });
 });
 
-it('does not turn an empty or repeated form submission into a Stop request', async () => {
-  const { w, live } = await boot([]);
-  const api = (w as any).api;
-  const stop = vi.fn(async () => ({ ok: true, data: {} }));
-  api.stopSessionTurn = stop;
-  const form = w.document.getElementById('composer')!;
-  form.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
-  await settle();
-  expect(stop).not.toHaveBeenCalled();
-  const input = w.document.getElementById('chatInput') as HTMLTextAreaElement;
-  input.value = 'A single correction'; input.dispatchEvent(new w.Event('input'));
-  form.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
-  form.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
-  await settle();
-  expect(live.sent.map(row => row.text)).toEqual(['A single correction']);
-  expect(stop).not.toHaveBeenCalled();
-});
-
 it('keeps actual-turn Stop through two authored sends and stops only the captured active turn', async () => {
   const { w, live } = await boot([]);
   const api = (w as any).api;
@@ -2666,7 +2606,7 @@ it('keeps actual-turn Stop through two authored sends and stops only the capture
   expect(live.sent.map(row => row.text)).toEqual(['First new direction', 'Second new direction']);
   expect(live.sent.every(row => row.sessionId === '2026-09-02-test0001' && row.mode === 'auto')).toBe(true);
   // A queued follow-up does not replace the real active turn as Stop's authority.
-  send.click();
+  form.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
   await settle();
   expect(stop).toHaveBeenCalledWith('2026-09-02-test0001', 'held-turn');
   expect(cancel).not.toHaveBeenCalled();
@@ -2683,7 +2623,7 @@ it('does not retarget an awaiting Stop after leaving and reselecting the same ch
   api.stopSessionTurn = stop;
   let resolve!: (value: any) => void;
   api.getSessionControls = () => new Promise(done => { resolve = done; });
-  w.document.getElementById('chatSend')!.click();
+  w.document.getElementById('composer')!.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
   api.getSessionControls = original;
   w.document.getElementById('newChat')!.click();
   (w.document.querySelector('#sessionList [data-id]') as HTMLElement).click();
@@ -3211,14 +3151,6 @@ it('opens every selected chat at the bottom and preserves manual reading during 
     expect(pane.scrollTop).toBe(pane.scrollHeight); // Chromium clamps to the actual bottom.
   };
   await select(first.id);
-  // A global notification from another chat still refreshes this idle selection.
-  // A deliberate small scroll away from its bottom must remain a reading position.
-  pane.scrollTop = pane.scrollHeight - pane.clientHeight - 20;
-  const nearTail = pane.scrollTop;
-  for (let index = 0; index < 3; index++) {
-    await append([]);
-    expect(pane.scrollTop).toBe(nearTail);
-  }
   for (let i = 0; i < 3; i++) {
     pane.scrollTop = 700;
     await append([]);

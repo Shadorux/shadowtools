@@ -26,4 +26,25 @@ describe('desktop helper overhaul contract', () => {
     expect(HELPER_SCRIPT).toContain('$script:UiSnapshots');
     expect(HELPER_SCRIPT).toContain('STALE_UI_SNAPSHOT');
   });
+
+  it('keeps model-driven pointer motion visible without replacing the system cursor', () => {
+    expect(HELPER_SCRIPT).toContain('public static class CursorGlow');
+    expect(HELPER_SCRIPT).toContain('CursorGlow.ShowAt(x, y, false)');
+    expect(HELPER_SCRIPT).toContain('double eased = t * t * (3.0 - 2.0 * t)');
+    expect(HELPER_SCRIPT).toContain('public static void MoveVisible(int x, int y)');
+    expect(HELPER_SCRIPT).toContain("'click'        { [Clf]::ClickVisible");
+    expect(HELPER_SCRIPT).not.toContain('SetSystemCursor');
+    expect(HELPER_SCRIPT).not.toContain('SystemParametersInfo');
+  });
+
+  it('keeps the model-visible capture free of its own cursor glow', () => {
+    expect(HELPER_SCRIPT).toContain('public static void HideForCapture()');
+    expect(HELPER_SCRIPT).toContain('[CursorGlow]::HideForCapture()');
+  });
+
+  it('has a disk-free visual fingerprint path for cheap change detection', () => {
+    expect(HELPER_SCRIPT).toContain('public static string FrameHash(');
+    expect(HELPER_SCRIPT).toContain("'framehash'");
+    expect(HELPER_SCRIPT).toContain('$result.hash = [Clf]::FrameHash');
+  });
 });
