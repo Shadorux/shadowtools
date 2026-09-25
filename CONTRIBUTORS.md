@@ -1,6 +1,6 @@
 # Contributors
 
-Chat On Steroids is maintained by [@totec448-spec](https://github.com/totec448-spec) and built with contributions from the community.
+ShadowTools is maintained by Shadorux and is derived from Chat On Steroids, originally maintained by [@totec448-spec](https://github.com/totec448-spec). The contribution record below preserves the upstream authors and original issue/PR links.
 
 Some contributions were adapted into maintainer snapshot commits and their original PRs were closed without preserving GitHub commit attribution. That was our mistake. Reworking a patch does not erase its author's contribution. The record below restores explicit credit and links to the original work.
 

@@ -1,11 +1,11 @@
 {
-  "name": "chat-on-steroids",
+  "name": "shadowtools",
   "version": "2.1.14",
   "description": "Local coding bridge for ChatGPT over MCP, with native desktop control and approved-folder capability limits.",
   "license": "MIT",
-  "author": "Chat On Steroids",
-  "homepage": "https://github.com/totec448-spec/chat-on-steroids",
-  "desktopName": "com.chatonsteroids.app.desktop",
+  "author": "Shadorux",
+  "homepage": "https://github.com/Shadorux/shadowtools",
+  "desktopName": "dev.shadorux.shadowtools.desktop",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

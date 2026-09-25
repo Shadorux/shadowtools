@@ -69,6 +69,11 @@ import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
 import { editContextMenuTemplate } from './edit-context-menu.js';
 
+// Rebranding the package must not strand existing settings, sessions, credentials, plugins,
+// or skills in a second Electron profile. Keep the pre-ShadowTools userData directory as a
+// compatibility identity while every public product/install surface uses the ShadowTools name.
+app.setPath('userData', path.join(app.getPath('appData'), 'chat-on-steroids'));
+
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
 const RETIRED_WORKERS_STATE = 'retired-workers';

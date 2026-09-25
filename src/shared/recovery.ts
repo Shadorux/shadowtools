@@ -7,7 +7,7 @@ export type RecoveryCountdown = {
   next?: 'queue' | 'continue';
   /** The original attribution retry conditions are currently satisfied. */
   reload?: true;
-  /** CoS still holds the source turn open during the existing post-reload wait. */
+  /** ShadowTools still holds the source turn open during the existing post-reload wait. */
   generating?: true;
 };
 

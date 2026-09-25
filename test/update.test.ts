@@ -54,8 +54,8 @@ const {
 } = await import('../src/main/update.js');
 
 const NEXT = '99.0.0';
-const WINDOWS_ASSET = `Chat-On-Steroids-Setup-${process.arch}.exe`;
-const APPIMAGE_ASSET = `Chat-On-Steroids-Linux-${process.arch}.AppImage`;
+const WINDOWS_ASSET = `ShadowTools-Setup-${process.arch}.exe`;
+const APPIMAGE_ASSET = `ShadowTools-Linux-${process.arch}.AppImage`;
 
 const sha256 = (body: string): string => createHash('sha256').update(body).digest('hex');
 
@@ -124,9 +124,9 @@ afterEach(() => {
 
 describe('which installations update themselves', () => {
   it('takes the Windows installer and the Linux AppImage, and nothing else', () => {
-    expect(stagedArtifact('win32', 'x64')).toMatchObject({ name: 'Chat-On-Steroids-Setup-x64.exe', kind: 'installer' });
+    expect(stagedArtifact('win32', 'x64')).toMatchObject({ name: 'ShadowTools-Setup-x64.exe', kind: 'installer' });
     expect(stagedArtifact('linux', 'arm64', '/opt/cos.AppImage')).toMatchObject({
-      name: 'Chat-On-Steroids-Linux-arm64.AppImage',
+      name: 'ShadowTools-Linux-arm64.AppImage',
       kind: 'appimage',
       target: '/opt/cos.AppImage'
     });
@@ -242,7 +242,7 @@ describe('staging the new version', () => {
   });
 
   it('stages nothing when the release does not publish an artifact for this installation', async () => {
-    github({ checksums: `${sha256('x')}  Chat-On-Steroids-Extension.zip\n` });
+    github({ checksums: `${sha256('x')}  ShadowTools-Extension.zip\n` });
     await asPlatform('win32', undefined, () => checkForUpdates());
     expect(updateStatus().stage).toBe('failed');
     expect(updateStatus().error).toContain(`publishes no ${WINDOWS_ASSET}`);

@@ -1,5 +1,5 @@
 /**
- * Whether a newer Chat On Steroids has been published, and the file that becomes it.
+ * Whether a newer ShadowTools has been published, and the file that becomes it.
  *
  * This is the whole updater: one pass, run at startup and repeated on a slow timer, that asks
  * GitHub for the latest release, stages the artifact this installation can actually apply, and
@@ -49,7 +49,7 @@ import { logInfo, logWarn } from './logger.js';
 import { APP_VERSION } from './version.js';
 import { isNewer, type UpdateStatus } from '../shared/types.js';
 
-const REPO = 'totec448-spec/chat-on-steroids';
+const REPO = 'Shadorux/shadowtools';
 const LATEST_RELEASE_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 
 const CHECK_TIMEOUT_MS = 15_000;
@@ -89,9 +89,9 @@ export function stagedArtifact(
 ): { name: string; kind: 'installer' | 'appimage'; target: string } | null {
   if (!packaged) return null;
   if (arch !== 'x64' && arch !== 'arm64') return null;
-  if (platform === 'win32') return { name: `Chat-On-Steroids-Setup-${arch}.exe`, kind: 'installer', target: '' };
+  if (platform === 'win32') return { name: `ShadowTools-Setup-${arch}.exe`, kind: 'installer', target: '' };
   if (platform === 'linux' && appImage) {
-    return { name: `Chat-On-Steroids-Linux-${arch}.AppImage`, kind: 'appimage', target: appImage };
+    return { name: `ShadowTools-Linux-${arch}.AppImage`, kind: 'appimage', target: appImage };
   }
   return null;
 }
@@ -279,7 +279,7 @@ async function get(url: string, timeout: number, headers: Record<string, string>
   const response = await fetch(url, {
     signal: AbortSignal.timeout(timeout),
     redirect: 'follow',
-    headers: { 'user-agent': `chat-on-steroids/${APP_VERSION}`, ...headers }
+    headers: { 'user-agent': `shadowtools/${APP_VERSION}`, ...headers }
   });
   if (!response.ok) throw new Error(`${new URL(url).pathname.split('/').pop()} answered ${response.status}`);
   return response;

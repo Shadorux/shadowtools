@@ -32,7 +32,7 @@ async function run(win){
   const js=code=>win.webContents.executeJavaScript(code);
   const wait=async (code,timeout=6000)=>{const until=Date.now()+timeout;while(Date.now()<until){if(await js(code))return;await delay(25);}throw new Error('Timed out: '+code);};
   await wait('!!document.getElementById("petLauncher")');
-  win.setTitle('Chat On Steroids — Pet Acceptance');win.unmaximize();win.setSize(1100,850);win.show();await delay(500);
+  win.setTitle('ShadowTools — Pet Acceptance');win.unmaximize();win.setSize(1100,850);win.show();await delay(500);
   await js(`document.getElementById('newChat')?.click();`);await delay(400);
   const capture=async name=>{fs.writeFileSync(path.join(output,name+'.png'),(await win.webContents.capturePage()).toPNG());};
   const record=async name=>{

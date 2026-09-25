@@ -3870,7 +3870,7 @@ describe('the app-owned chronological stream', () => {
       ({ messageId, rawMessageId: messageId, stable: true, rawText, renderedHtml: '' }));
     section.setAttribute('data-clf-fiber-turn', '0');
     await replyFiber([{
-      v: 19, index: 0, messageId: 'interim-native-X', tool: 'read', app: 'Chat On Steroids Core', answered: true,
+      v: 19, index: 0, messageId: 'interim-native-X', tool: 'read', app: 'ShadowTools Core', answered: true,
       conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     }], [{ turnId: 'interrupted-fold-page', conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', messages,
       calls: [{ messageId: 'interim-native-X', requestId, tool: 'read', order: 0, answered: true }], activities: [],
@@ -5218,10 +5218,10 @@ describe('the app-owned chronological stream', () => {
     blocks[0]!.setAttribute('data-clf-fiber', '0');
     blocks[1]!.setAttribute('data-clf-fiber', '1');
     const rows = (secondAnswered: boolean) => [
-      { v: 19, index: 0, messageId: 'fiber-one', tool: 'read_file', path: '/Chat On Steroids Core/read_file',
-        app: 'Chat On Steroids Core', answered: true, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
-      { v: 19, index: 1, messageId: 'fiber-two', tool: 'exec_command', path: '/Chat On Steroids Core/exec_command',
-        app: 'Chat On Steroids Core', answered: secondAnswered, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }
+      { v: 19, index: 0, messageId: 'fiber-one', tool: 'read_file', path: '/ShadowTools Core/read_file',
+        app: 'ShadowTools Core', answered: true, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
+      { v: 19, index: 1, messageId: 'fiber-two', tool: 'exec_command', path: '/ShadowTools Core/exec_command',
+        app: 'ShadowTools Core', answered: secondAnswered, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }
     ];
     const turn = (secondAnswered: boolean) => ({
       turnId: 'page-live-call-gap',
@@ -5247,8 +5247,8 @@ describe('the app-owned chronological stream', () => {
   });
 
   it.each([
-    ['Chat On Steroids Plugins', true],
-    ['Chat On Steroids Backup', false]
+    ['ShadowTools Plugins', true],
+    ['ShadowTools Backup', false]
   ] as const)('suppresses only an answered exact supported connector block (%s)', async (app, hidden) => {
     live = await harness(undefined, { activity: () => ({ ok: true, data: {
       entries: [], userAnchors: [{ seq: 0, time: 50, messageId: 'm-exact-block-owner' }], stream: [
@@ -5287,7 +5287,7 @@ describe('the app-owned chronological stream', () => {
     blocks.forEach((block, index) => block.setAttribute('data-clf-fiber', String(index)));
     const calls = ['read', secondTool].map((tool, index) => ({ messageId: `result-provider-${index}`, tool, order: index, requestId, answered: true }));
     await replyFiber(calls.map((call, index) => ({ v: 19, index, ...call, path: null,
-      app: 'Chat On Steroids Core', resource: `/asdk_app_fixture/link_fixture/${call.tool}`,
+      app: 'ShadowTools Core', resource: `/asdk_app_fixture/link_fixture/${call.tool}`,
       conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' })), [{ turnId: 'result-only-page', calls }]);
     await live.hook.pullActivity(); live.hook.renderStreams();
     expect(overwriteRows(section, '[data-clf-call]')).toHaveLength(1);
@@ -6233,7 +6233,7 @@ describe('the app-owned chronological stream', () => {
     block.setAttribute('data-clf-fiber', '0');
     const bind = async (answered: boolean) => replyFiber([{
       v: 19, index: 0, messageId: 'fiber-moved-call', tool: 'read_file',
-      path: '/Chat On Steroids Core/read_file', app: 'Chat On Steroids Core', answered,
+      path: '/ShadowTools Core/read_file', app: 'ShadowTools Core', answered,
       conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     }], [{ turnId, calls: [{ messageId: 'fiber-moved-call', tool: 'read_file', order: 0,
       answered, requestId: 'wfr-app-stream' }] }]);
@@ -11707,7 +11707,7 @@ describe('the Compact & resume control', () => {
     expect(state({})).toMatchObject({ mode: 'idle', label: 'Compact', action: 'start' });
     expect(state({ disconnected: true })).toMatchObject({
       mode: 'off',
-      hint: 'Browser connection is disconnected in Chat On Steroids.',
+      hint: 'Browser connection is disconnected in ShadowTools.',
       action: 'none'
     });
     expect(state({ pressedAt: 900 })).toMatchObject({ mode: 'busy', label: 'Starting…', action: 'none' });
@@ -12233,7 +12233,7 @@ describe('the Compact & resume control', () => {
     live.hook.injectControl();
     const stale =
       '[[CLF-HANDOFF:fedcba9876543210fedcba9876543210]]\n\n' +
-      'Chat On Steroids is compacting this conversation so a fresh chat can continue the work. Stop whatever you were doing and do only this.\n\n' +
+      'ShadowTools is compacting this conversation so a fresh chat can continue the work. Stop whatever you were doing and do only this.\n\n' +
       'stale rejected handoff prompt';
     live.document.querySelector('#prompt-textarea')!.textContent = stale;
 
@@ -13577,7 +13577,7 @@ describe('the fresh chat the app opened', () => {
             type: 'worker',
             text: `${task}
 
-(You are a worker agent in a Chat On Steroids multi-agent run.)`,
+(You are a worker agent in a ShadowTools multi-agent run.)`,
             agent: 'worker-1'
           }
         }),
@@ -13587,7 +13587,7 @@ describe('the fresh chat the app opened', () => {
         document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
           submitted = composerText(document);
           dom.reconfigure({ url: 'https://chatgpt.com/c/22222222-3333-4444-5555-666666666666' });
-          userTurn(document, 'accepted-short-worker', `${task}\n\n(You are a worker agent in a Chat On Steroids multi-agent run.)`, { sent: false });
+          userTurn(document, 'accepted-short-worker', `${task}\n\n(You are a worker agent in a ShadowTools multi-agent run.)`, { sent: false });
         });
       }
     );

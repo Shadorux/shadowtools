@@ -143,7 +143,7 @@ export async function runInstaller(command: string, args: string[], cwd: string)
     }, 180000);
     child.once('error', () => {
       clearTimeout(timer);
-      reject(new Error(`Required runtime ${path.basename(command)} is unavailable; install it and restart CoS`));
+      reject(new Error(`Required runtime ${path.basename(command)} is unavailable; install it and restart ShadowTools`));
     });
     child.once('exit', (code) => {
       clearTimeout(timer);
@@ -230,7 +230,7 @@ export async function installSource(source: PluginSource, dir: string): Promise<
       try {
         await fs.access(npm);
       } catch {
-        throw new Error('Install the standard Node.js distribution including npm, then restart CoS');
+        throw new Error('Install the standard Node.js distribution including npm, then restart ShadowTools');
       }
       await runInstaller(node, [npm, ...args], dir);
     } else await runInstaller('npm', args, dir);
@@ -285,5 +285,5 @@ async function findExecutable(name: string): Promise<string> {
       /* next PATH entry */
     }
   }
-  throw new Error(`Install ${name} and restart CoS`);
+  throw new Error(`Install ${name} and restart ShadowTools`);
 }

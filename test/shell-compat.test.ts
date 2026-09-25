@@ -42,7 +42,7 @@ function fixture() {
     { type: 'user-message', messageId: USER, serverMessageId: USER, message: 'hello' },
     { type: 'chatgpt-reasoning-group', items: [
       { type: 'reasoning', presentation: 'preamble', content: 'Commentary without a provider message id' },
-      { type: 'mcp-tool-call', callId: CALL, completed: false, invocation: { server: 'Chat On Steroids Core', tool: 'link_x/read', arguments: { private: 'NEVER_COPY_TOOL_ARGS' } }, result: null }
+      { type: 'mcp-tool-call', callId: CALL, completed: false, invocation: { server: 'ShadowTools Core', tool: 'link_x/read', arguments: { private: 'NEVER_COPY_TOOL_ARGS' } }, result: null }
     ] },
     { type: 'assistant-message', messageId: ANSWER, content: 'Answer', phase: 'final_answer', completed: false }
   ] as any[] } };
@@ -207,7 +207,7 @@ it('reads request metadata only for the mounted shell message ids in the exact n
   const f = fixture();
   const message = { id: CALL, author: { role: 'assistant' }, recipient: 'api_tool.call_tool',
     metadata: { request_id: OTHER }, create_time: 1700000000,
-    content: { content_type: 'code', text: '{"path":"/Chat On Steroids Core/link_x/read","args":{"secret":"NEVER_COPY"}}' } };
+    content: { content_type: 'code', text: '{"path":"/ShadowTools Core/link_x/read","args":{"secret":"NEVER_COPY"}}' } };
   f.queries.push({ queryKey: ['chatgpt-conversation', THREAD], state: { data: { mapping: {
     [CALL]: { id: CALL, message },
     [OTHER]: { id: OTHER, message: { ...message, id: OTHER, metadata: { request_id: 'wfr_UNSELECTED' } } }
@@ -238,7 +238,7 @@ function liveShellMapping(f: ReturnType<typeof fixture>, compiler = false) {
   const mapping: any = {
     [USER]: plain(USER, 'user', 'hello'), [ANSWER]: plain(ANSWER, 'assistant', 'Answer', 'final'),
     [CALL]: { id: CALL, message: { id: CALL, author: { role: 'assistant' }, recipient: 'api_tool.call_tool',
-      metadata: { request_id: OTHER }, content: { content_type: 'code', text: '{"path":"/Chat On Steroids Core/link_x/read","args":{"private":"DO_NOT_COPY"}}' } } },
+      metadata: { request_id: OTHER }, content: { content_type: 'code', text: '{"path":"/ShadowTools Core/link_x/read","args":{"private":"DO_NOT_COPY"}}' } } },
     [thought]: { id: thought, message: { id: thought, author: { role: 'assistant' },
       content: { content_type: 'thoughts', thoughts: [{ summary: 'Inspecting the project', content: 'PRIVATE_REASONING_CONTENT' }] }, metadata: {} } },
     [preamble]: plain(preamble, 'assistant', 'I will inspect the project.', 'commentary')

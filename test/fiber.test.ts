@@ -52,8 +52,8 @@ const THREAD = 'f0f00004-1111-4111-8111-111111111111';
  * metadata, and the fixture spells it exactly because the whole evidence pipeline once
  * matched a single hardcoded name that no longer existed.
  */
-const APP = 'Chat On Steroids Core';
-const DESKTOP_APP = 'Chat On Steroids Desktop';
+const APP = 'ShadowTools Core';
+const DESKTOP_APP = 'ShadowTools Desktop';
 /** What the connector was called before 1.7.1 split it. Older chats still hold it. */
 const LEGACY_APP = 'TobisComputer';
 /** The connector's link id, as it appears in a request path. */
@@ -443,7 +443,7 @@ describe('reading a row out of the page', () => {
       answered: true, requestId: 'wfr_01a009', createTime: 1786873669.5 }]);
   });
 
-  it.each(['Chat On Steroids Core', 'Chat On Steroids Desktop', 'Chat On Steroids Plugins', 'Chat On Steroids Backup', 'Gmail'])(
+  it.each(['ShadowTools Core', 'ShadowTools Desktop', 'ShadowTools Plugins', 'ShadowTools Backup', 'Gmail'])(
     'keeps result-only metadata scoped to the exact supported connector %s', async app => {
       const result = answer('result-scope', 'unused', 'read', app);
       result.author.name = 'api_tool.call_tool';
@@ -452,7 +452,7 @@ describe('reading a row out of the page', () => {
       // Duplicate provider objects are ambiguous, including result-only shapes.
       expect(turns[0]!.calls).toEqual([]);
       const single = await scan([], [{ id: 'result-scope-turn', messages: [result] }]);
-      expect(single.turns[0]!.calls).toHaveLength(['Chat On Steroids Backup', 'Gmail'].includes(app) ? 0 : 1);
+      expect(single.turns[0]!.calls).toHaveLength(['ShadowTools Backup', 'Gmail'].includes(app) ? 0 : 1);
     });
 
   /**
@@ -578,15 +578,15 @@ describe('the calls a turn says it made', () => {
   });
 
   /**
-   * A name is not a prefix game. `Chat On Steroids Backup` shares every character of the
+   * A name is not a prefix game. `ShadowTools Backup` shares every character of the
    * brand and is still a different integration; matching on the brand rather than on the
    * exact connector names would make this app vouch for its calls and file a stranger's
    * traffic into this chat's session.
    */
   it('refuses a connector whose name merely starts with this app’s brand', async () => {
     const messages = [
-      request('req-fake', 'read', { app: 'Chat On Steroids Backup' }),
-      answer('res-fake', 'req-fake', 'read', 'Chat On Steroids Backup'),
+      request('req-fake', 'read', { app: 'ShadowTools Backup' }),
+      answer('res-fake', 'req-fake', 'read', 'ShadowTools Backup'),
       request('req-mine', 'read')
     ];
     const { turns } = await scan([], [{ id: 'turn-lookalike', messages }]);

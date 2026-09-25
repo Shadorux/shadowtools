@@ -110,10 +110,10 @@
    * (`server.ts`), so these are this app naming itself rather than labels somebody typed.
    * The pre-1.7.1 name stays so an older chat's evidence still reads.
    *
-   * Exact names, never a prefix: `Chat On Steroids Backup` would be somebody else's
+   * Exact names, never a prefix: `ShadowTools Backup` would be somebody else's
    * connector, and a prefix test would have this app vouch for its traffic.
    */
-  const OUR_APPS = ['Chat On Steroids Core', 'Chat On Steroids Desktop', 'Chat On Steroids Plugins', 'TobisComputer'];
+  const OUR_APPS = ['ShadowTools Core', 'ShadowTools Desktop', 'ShadowTools Plugins', 'TobisComputer'];
 
   /** Whether an `invoked_resource.app_name` names one of this app's own connectors. */
   function ourApp(name) {
@@ -1097,7 +1097,7 @@
     return out;
   }
 
-  /** "/Chat On Steroids Core/link_…/read" -> "read", or null if that is not a name. */
+  /** "/ShadowTools Core/link_…/read" -> "read", or null if that is not a name. */
   function toolName(value) {
     if (typeof value !== 'string' || value.length === 0) return null;
     const tail = value.slice(value.lastIndexOf('/') + 1);
@@ -2034,7 +2034,7 @@
         if (props.actions === observedActions) continue;
         if (observedActions) return null;
         observedActions = props.actions;
-        const externalPlugins = props.connector.name === 'Chat On Steroids Plugins';
+        const externalPlugins = props.connector.name === 'ShadowTools Plugins';
         if ((!props.actions.length && !externalPlugins) || props.actions.length > (externalPlugins ? 257 : 16) || typeof props.connector.name !== 'string') return null;
         const budget = { bytes: 280000, nodes: 20000 };
         const tools = props.actions.map(action => ({ name: action.name, description: copySchema(action.description_model ?? action.description, budget), inputSchema: copySchema(action.params, budget) }));

@@ -3057,7 +3057,7 @@ const HANDLERS = {
     await persist();
     return { ok: true };
   },
-  /** Ask every eligible ChatGPT tab to rebuild its Chat On Steroids activity stream now. */
+  /** Ask every eligible ChatGPT tab to rebuild its ShadowTools activity stream now. */
   async overwriteNow() {
     await load();
     const known = Object.keys(tabConversations)

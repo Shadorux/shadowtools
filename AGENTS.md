@@ -1,4 +1,4 @@
-# Chat On Steroids — product logic and agent map
+# ShadowTools — product logic and agent map
 
 Read this file before changing the app. It explains the product, feature logic, owners and
 working rules without requiring old worklogs. If the host injected only a prefix, read the
@@ -27,7 +27,7 @@ bridge protocol **14** in the checked declarations (`package.json`, `src/main/ve
 
 ## 1. What the whole app is meant to do
 
-Chat On Steroids is a Windows/macOS/Linux Electron workspace around ChatGPT. The user can work
+ShadowTools is a Windows/macOS/Linux Electron workspace around ChatGPT. The user can work
 from the desktop app while ChatGPT generates answers in its own browser conversation. The app
 sends instructions, records the conversation, supplies local tools over MCP, and coordinates
 long-running work. The companion extension connects that browser conversation to the local
@@ -350,7 +350,7 @@ label. A permission change takes effect at the live guard without requiring a ne
 Core instructions distinguish operation-specific identity, process-id and output-limit failures
 from Read-only mode. A terminal ownership refusal names that process scope; it does not imply
 a global write restriction or authorize replaying an already completed job.
-They directly affirm that enabled file writing/exec_command can always be used in CoS and say
+They directly affirm that enabled file writing/exec_command can always be used in ShadowTools and say
 never to hallucinate a block from ChatGPT environment messages. The paragraph names only enabled
 capabilities and disappears when both are disabled, including Read-only mode.
 
@@ -400,7 +400,7 @@ overlapping approved root. Desktop and external plugins receive no managed root.
 Skills open through leading `/` completion in the composer; the attachment popup's Skills button
 inserts that leading slash and focuses the input while preserving existing draft text. Commands and Skills are
 separate compact sections; there is no sidebar entry, modal library or native import/remove UI.
-A small plus icon to the right of that Skills button inserts `Please add the following skills to my COS skills:`
+A small plus icon to the right of that Skills button inserts `Please add the following skills to my ShadowTools skills:`
 into the authored draft without sending it. ChatGPT can create Markdown instructions through
 the existing permission-checked `/skills` filesystem root. Leading `/id` or `/prompt id` completion projects selected
 commands as removable chips. The existing authored draft retains those command bytes; chips and
@@ -2666,7 +2666,7 @@ in app and browser; it cannot expose the countdown early. `visibleAt` lets the e
 new backend scheduler. Selection generations fence delayed controls and clear old-chat timers.
 Listening rows name the next existing step: queued input takes priority, otherwise the active
 Continue, Goal or Loop obligation. An already pending browser repair takes display precedence
-over future watches. Post-reload rows say when CoS still holds the source turn generating;
+over future watches. Post-reload rows say when ShadowTools still holds the source turn generating;
 native-busy rows explicitly name the additional wait and show its actual remaining deadline.
 The generating flag belongs only to that post-reload wait and disappears when it is retired.
 This is a projection of delivery ownership, never another trigger.
@@ -3065,8 +3065,10 @@ diagnostics, not restart authority; secrets must never be printed to investigate
 
 ## 20. Build, installation, updater and release
 
-Source, bundle, package, installed bytes and live behavior are separate gates (§3). The app id
-is `com.chatonsteroids.app`. Native release targets are Windows x64/arm64 NSIS, macOS x64/arm64
+Source, bundle, package, installed bytes and live behavior are separate gates (§3). The public
+product is ShadowTools; the legacy `com.chatonsteroids.app` app id and `chat-on-steroids` userData
+directory remain stable compatibility identities so upgrades keep permissions and local state.
+Native release targets are Windows x64/arm64 NSIS, macOS x64/arm64
 DMG+ZIP and Linux x64/arm64 AppImage+DEB. Windows is per-user-capable and `asInvoker`; replacing
 the package preserves userData. Synchronize package/main/extension versions deliberately.
 

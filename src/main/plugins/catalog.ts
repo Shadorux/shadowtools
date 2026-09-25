@@ -1,6 +1,6 @@
 import type { PluginCatalogEntry, PluginSource } from '../../shared/plugins.js';
 
-/** Reviewed upstream recipes; versions are pinned until an explicit update. Icons are original CoS artwork. */
+/** Reviewed upstream recipes; versions are pinned until an explicit update. Icons are original ShadowTools artwork. */
 export const pluginCatalog: PluginCatalogEntry[] = [
   {
     id: 'blender',

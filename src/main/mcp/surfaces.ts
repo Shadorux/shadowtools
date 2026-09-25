@@ -36,7 +36,7 @@ export type SurfaceId = (typeof SURFACE_IDS)[number];
  * name and the setup cards, and those three drifting apart is how a user ends up with
  * a connector whose name does not match the thing the instructions told them to type.
  */
-export const CONNECTOR_BRAND = 'Chat On Steroids';
+export const CONNECTOR_BRAND = 'ShadowTools';
 
 export interface SurfaceDefinition {
   id: SurfaceId;
@@ -95,6 +95,7 @@ export interface SurfaceDefinition {
  */
 const CORE: SurfaceDefinition = {
   id: 'core',
+  // Compatibility id: existing ChatGPT connectors cache the MCP server name.
   serverName: 'chat-on-steroids-core',
   connectorName: `${CONNECTOR_BRAND} Core`,
   description:
@@ -121,6 +122,7 @@ const CORE: SurfaceDefinition = {
  */
 const DESKTOP: SurfaceDefinition = {
   id: 'desktop',
+  // Compatibility id: existing ChatGPT connectors cache the MCP server name.
   serverName: 'chat-on-steroids-desktop',
   connectorName: `${CONNECTOR_BRAND} Desktop`,
   description:
@@ -138,7 +140,7 @@ const DESKTOP: SurfaceDefinition = {
 const PLUGINS: SurfaceDefinition = {
   id: 'plugins', serverName: 'chat-on-steroids-plugins',
   connectorName: `${CONNECTOR_BRAND} Plugins`,
-  description: 'Tools from external MCP integrations installed and enabled in Chat On Steroids Settings, including Blender and other connected applications and services.',
+  description: 'Tools from external MCP integrations installed and enabled in ShadowTools Settings, including Blender and other connected applications and services.',
   cardSummary: 'One shared connector for your enabled external MCP plugins.',
   required: false,
   // Dynamic declarations are owned and bounded by the plugin manager.

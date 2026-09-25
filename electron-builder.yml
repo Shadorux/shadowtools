@@ -1,3 +1,5 @@
+# Compatibility identity: changing this would create a second Windows install and a new macOS
+# permission subject. Product/artifact/UI names are ShadowTools; the legacy app id remains stable.
 appId: com.chatonsteroids.app
 productName: ShadowTools
 copyright: MIT licensed
@@ -89,7 +91,7 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: ShadowTools
-  artifactName: Chat-On-Steroids-Setup-${arch}.${ext}
+  artifactName: ShadowTools-Setup-${arch}.${ext}
   uninstallDisplayName: ShadowTools
   deleteAppDataOnUninstall: false
 
@@ -114,7 +116,7 @@ mac:
   # nothing Gatekeeper will vouch for — and verifies the result.
   identity: null
   notarize: false
-  artifactName: Chat-On-Steroids-macOS-${arch}.${ext}
+  artifactName: ShadowTools-macOS-${arch}.${ext}
   files:
     - from: resources/packaging/native/darwin/${arch}/node_modules
       to: node_modules
@@ -138,12 +140,12 @@ linux:
     - deb
   icon: build/icon.png
   category: Development
-  executableName: chat-on-steroids
-  maintainer: ShadowTools <227782719+totec448-spec@users.noreply.github.com>
+  executableName: shadowtools
+  maintainer: Shadorux <shadoruxwebmaster@proton.me>
   syncDesktopName: true
   # electron-builder rewrites x64 to x86_64 for AppImage and amd64 for DEB when ${arch}
   # is used. Keep one stable public architecture label across formats/releases instead.
-  artifactName: Chat-On-Steroids-Linux-${env.COS_PACKAGE_ARCH}.${ext}
+  artifactName: ShadowTools-Linux-${env.COS_PACKAGE_ARCH}.${ext}
   files:
     - from: resources/packaging/native/linux/${arch}/node_modules
       to: node_modules

@@ -28,8 +28,8 @@ async function buildAndRun() {
     window.disposePet = initPet();
   `);
   fs.writeFileSync(path.join(fixture, 'index.html'), `<!doctype html><html lang="en"><head>
-    <meta charset="utf-8"><title>CoS Pet CPU Verification</title></head>
-    <body><div class="app"><aside class="sidebar">Chat On Steroids</aside>
+    <meta charset="utf-8"><title>ShadowTools Pet CPU Verification</title></head>
+    <body><div class="app"><aside class="sidebar">ShadowTools</aside>
     <main><h1>Pet rendering verification</h1><p>Production artwork, animation and CSS.</p>
     <form class="composer" style="position:fixed;bottom:16px;left:240px;right:16px">
     <textarea rows="1" placeholder="Ask anything"></textarea><div class="composer-toolbar">
