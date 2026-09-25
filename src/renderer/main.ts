@@ -485,7 +485,8 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark'; appearance?:
       planReasoning: $<HTMLSelectElement>('planReasoning').value as AppState['config']['ui']['planReasoning'],
       finishLeadMinutes: Number($<HTMLSelectElement>('finishLeadMinutes').value),
       backgroundChats: $<HTMLInputElement>('backgroundChats').checked,
-      autoContinue: $<HTMLInputElement>('autoContinue').checked,
+      // Automatic continuation has no UI in ShadowTools and stays retired.
+      autoContinue: false,
       browserOnly: $<HTMLInputElement>('browserOnly').checked,
       autoRefreshPlugins: $<HTMLInputElement>('autoRefreshPlugins').checked,
       autoConnect: $<HTMLInputElement>('autoConnect').checked,
@@ -1062,7 +1063,6 @@ function apply(next: AppState): void {
   applyChecked($<HTMLInputElement>('finishTool'), config.ui.finishTool === true, previousState?.config.ui.finishTool);
   applyValue($<HTMLSelectElement>('finishLeadMinutes'), String(config.ui.finishLeadMinutes ?? 5), String(previousState?.config.ui.finishLeadMinutes ?? 5));
   applyChecked($<HTMLInputElement>('backgroundChats'), config.ui.backgroundChats === true, previousState?.config.ui.backgroundChats);
-  applyChecked($<HTMLInputElement>('autoContinue'), config.ui.autoContinue !== false, previousState?.config.ui.autoContinue);
   applyChecked($<HTMLInputElement>('browserOnly'), config.ui.browserOnly === true, previousState?.config.ui.browserOnly);
   applyChecked($<HTMLInputElement>('autoRefreshPlugins'), config.ui.autoRefreshPlugins === true, previousState?.config.ui.autoRefreshPlugins);
   $('startAtLoginRow').hidden = next.loginStartupAvailable !== true;

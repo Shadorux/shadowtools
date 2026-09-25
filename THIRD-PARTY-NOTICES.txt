@@ -1,20 +1,20 @@
-Chat On Steroids — Third-party Notices
+ShadowTools — Third-party Notices
 
-CoS remains MIT licensed; see LICENSE. This inventory preserves the license and notice texts
+ShadowTools remains MIT licensed; see LICENSE. This inventory preserves the license and notice texts
 of the production npm components present when this build was prepared. Platform-specific
 Electron/Chromium, native image libraries, ripgrep and tunnel-client notices also accompany
 their respective packaged binaries. Optional packages for other targets are supplied by
 the packaging pipeline together with their notices.
 
-Catalog artwork: Copyright (c) 2026 Chat On Steroids contributors. MIT licensed, see LICENSE.
+Catalog artwork: Copyright (c) 2026 ShadowTools contributors. MIT licensed, see LICENSE.
 Original illustrations are not official product logos. Product names identify independent
 integrations and do not imply affiliation or endorsement. External plugins installed by users
-are not bundled with CoS; their package directories retain their own licenses and notices.
+are not bundled with ShadowTools; their package directories retain their own licenses and notices.
 
 ================================================================================
 OpenAI Codex — adapted coding instructions and update_plan contract
 Source: https://github.com/openai/codex/tree/1a4096e273e80da30947e57fdfa45be92858ca91
-CoS adapts identity and available tools, removes Codex-specific facilities and adds bounded plan details and session storage.
+ShadowTools adapts identity and available tools, removes Codex-specific facilities and adds bounded plan details and session storage.
 
 --- Codex LICENSE ---
                                  Apache License
@@ -7715,8 +7715,8 @@ Upstream build/source projects:
 - libvips source: https://github.com/libvips/libvips
 
 The current dependency set uses sharp 0.35.4 / libvips 8.18.6. The release pipeline
-places `Chat-On-Steroids-Native-Sources.tar.gz` beside the matching installers at:
-https://github.com/totec448-spec/chat-on-steroids/releases
+places `ShadowTools-Native-Sources.tar.gz` beside the matching installers at:
+https://github.com/Shadorux/shadowtools/releases
 Use the source archive and checksums from the same release as your installer.
 
 It contains original component archives, locked Rust dependency sources, build repositories,
@@ -203280,7 +203280,7 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
 
 ================================================================================
 Optional plugin catalog — separate installations and hosted services
-Reviewed package licenses and hosted-service references follow. External server code is not bundled with CoS; custom installations and updates retain their own notices.
+Reviewed package licenses and hosted-service references follow. External server code is not bundled with ShadowTools; custom installations and updates retain their own notices.
 
 ================================================================================
 @modelcontextprotocol/server-memory@2026.8.31
@@ -203821,4 +203821,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
