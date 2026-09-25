@@ -541,8 +541,8 @@
    * committed before the reload. Live 2026-09-02: that transcript was interim prose of a turn
    * still running, the Stop control had not come back yet, and the degraded DOM rule closed
    * the adopted turn as completed four seconds in while the same request id went on calling
-   * tools for twenty-four minutes — after which Goal wrote the next user message against an
-   * answer that had never been given. So until this document sees the turn running, visible
+   * tools for twenty-four minutes — after which later automation treated the turn as finished
+   * even though the answer had never been given. So until this document sees the turn running, visible
    * prose never closes it: only the page model, an error, a user stop, a new send or the stall
    * budget may. See endOutcome.
    */
@@ -786,7 +786,6 @@
     return CLF_DOM.send({ stillCurrent, clearAcceptedDraft, beforeSend, acceptUserReceipt, matchesUser,
       observeEvidence: check => { pageViewChecks.add(check); return () => pageViewChecks.delete(check); } });
   }
-  const GOAL_MARKER_INSTRUCTION = '\n\nFor this Goal session only: at the end of each final reply, write exactly one separate last line: [[COS_GOAL:COMPLETE]] if the entire requested task is finished, or [[COS_GOAL:CONTINUE]] if requested work remains. Do not claim completion for partial work. If user input is required, explain it and omit both markers.';
   function matchesUserSendReceipt(message, receipt) {
     if (!message || !receipt || (!desktopInputBusy && !commandAttempt && !receipt.accepted &&
         Date.now() - receipt.at > USER_SEND_RECEIPT_MS)) return false;
@@ -801,12 +800,6 @@
   }
 
   function rememberUserSend() {
-    // Only the explicitly selected offline Goal backend changes the user prompt.
-    const composer = CLF_DOM.composer();
-    if (goalConfig?.backend === 'templates' && (goalConfig?.enabled === true || (!goalConfig?.own && !!goalConfig?.objective)) && goalConfig?.mode !== 'loop' && !desktopDecision) {
-      const raw = composer?.innerText || composer?.textContent || '';
-      if (raw.trim() && !raw.includes(GOAL_MARKER_INSTRUCTION.trim())) CLF_DOM.insertPrompt(raw + GOAL_MARKER_INSTRUCTION, true);
-    }
     const text = sendText(CLF_DOM.composer()?.textContent);
     const attachmentNames = CLF_DOM.composerAttachmentNames();
     if (!text && !attachmentNames.length) return;
@@ -868,149 +861,8 @@
    * it goes false again on its own the moment the answer lands.
    */
 
-  /**
-   * The goal loop, as this page sees it.
-   *
-   * `goalConfig` is the app's answer to "is it on, and can it work" — the switch plus
-   * whether an OpenRouter key exists at all, because the second is the difference between a
-   * feature that is off and one that is broken, and only the app knows it.
-   *
-   * `goalDraft` is whatever draft the app currently holds for this chat: its stage, the text
-   * as it streams in, and — once, at `ready` — the message to type. Both arrive on the same
-   * /activity poll as everything else.
-   */
-  let goalConfig = null;
-  let goalDraft = null;
-  /**
-   * The generation the goal loop has already acted on.
-   *
-   * One draft per finished turn, decided here rather than by the app alone: a page that asked
-   * twice for one turn would be asking the app to be idempotent about a message it has
-   * already sent. The app is idempotent anyway — that is what `turnId` is for on /goal/draft —
-   * and this is the near-side half of the same rule.
-   */
-  let goalTurnId = null;
-  /**
-   * Retries already spent on the claimed turn, and the wait the next one was announced with.
-   *
-   * Each failed draft is a full request — the whole conversation, twenty thousand tokens on a
-   * long chat — so asking again every fifteen seconds for as long as a provider keeps answering
-   * badly is a key being emptied at four requests a minute (2026-09-03: three unreadable
-   * answers in a row, then more). The wait doubles per failure of the same turn, up to four
-   * minutes; a new turn starts at fifteen seconds again.
-   */
-  let goalRetries = 0;
-  let goalRetryWaitMs = 0;
-  // The durable pickup episode currently claimed by this document. A stable assistant reply
-  // may deliberately be picked up again after Off -> On, so its turn id alone is not the
-  // once-key. The app renews acceptedAt for every such episode and publishes it with pending.
-  let goalTicketId = null;
-  /** What this tab is doing about the goal loop right now. '' when it is doing nothing. */
-  let goalPhase = '';
-  /** Why the loop is where it is, in the app's own words. Empty unless something stopped. */
-  let goalError = '';
-  /**
-   * Moves the goal loop to a step, says why, and shows it. The only way to do any of the three.
-   *
-   * The panel is drawn from these two fields, and the reason outranks the step: any non-empty
-   * `goalError` draws "The goal loop stopped", whatever the phase says. So they are one fact
-   * and not two, and starting a step clears the reason the previous one ended with - by
-   * construction, rather than by every caller remembering to. Assigning them apart is what
-   * froze the panel on a retryable OpenRouter failure: the retry did run and did set
-   * `requesting`, but the stale reason kept the stopped card up until a message appeared
-   * fifteen seconds later, so the loop looked dead while it was working.
-   *
-   * Redrawing here rather than at the call sites is the other half of that. A phase nobody can
-   * see is a phase nobody has, and "remember to repaint" is a rule that need only be forgotten
-   * once, at any one of twenty-odd assignments, to strand the user in front of a stale card.
-   */
-  function setGoalPhase(phase, reason = '') {
-    if (goalPhase === phase && goalError === reason) return;
-    goalPhase = phase;
-    goalError = reason;
-    // Phase changes must replace an already armed hidden-idle deadline. Computing
-    // a faster delay only when that old timer fires adds up to 30 seconds per round.
-    if (phase) expediteActivityPull();
-    injectStage();
-    renderControl();
-  }
-
-  /** Guards the settle watch and the send, so one finished turn produces one message. */
-  let goalBusy = false;
-  /** When this tab started trying to type a ready draft, so a held composer eventually gives up. */
-  let goalTypingSince = 0;
-  /** Terminal Goal card the user dismissed. Keyed to its chat + finished turn across repaints. */
-  let dismissedGoalStage = null;
-  /**
-   * A goal saved for a chat ChatGPT has not named yet.
-   *
-   * The app keys a specific goal by conversation, and a New Chat has no conversation until
-   * its first message has been sent. That first message is the one this very goal is about
-   * to produce, so the goal waits here across exactly one gap — from Save until the id
-   * arrives — and is handed to the app the moment there is something to key it to. See the
-   * "same chat has just learned its own id" branch in observe().
-   */
-  let pendingObjective = '';
-  /**
-   * The mode that goal was written in, waiting across the same gap.
-   *
-   * It has to travel with the text and cannot be re-derived at the other end: the chat this
-   * is about to become has no switch of its own yet, so anything asking "goal or loop?" once
-   * the id arrives would be asking the app-wide default — which is exactly the answer that
-   * turned an unattended Loop into a Goal that stopped at the second turn.
-   */
-  let pendingObjectiveMode = 'goal';
-  // One opening send owns its route while exact authored-user evidence arrives. Acceptance
-  // alone (for example a cleared composer) never binds the goal to a later sidebar chat.
-  let pendingObjectiveSend = null;
-  /** Set while a specific goal is being saved or its opening message written. */
-  let objectiveBusy = false;
-  /** The last specific-goal failure, in the app's words, until the next attempt replaces it. */
-  let objectiveError = '';
-  /**
-   * Goal drafts that this tab has already sent or abandoned before Send.
-   *
-   * Sending and acknowledging are two different network hops. If ChatGPT accepts the message
-   * and the following `/goal/ack` misses the app, `/activity` quite correctly offers the same
-   * unacknowledged draft again. Treating that as permission to type again duplicates the user's
-   * message. Keep a small receipt journal in sessionStorage so the same browser tab also
-   * survives a content-script reload between those two hops; a re-offered spent token retries
-   * only its acknowledgement, never the send. A `busy:` token retries the native-work
-   * deferral instead of a delivery ACK, preserving the owed continuation after a lost reply.
-   */
-  const GOAL_SPENT_STORAGE = 'clf-goal-spent-v1';
-  const goalSpent = new Set();
-  try {
-    const restored = JSON.parse(sessionStorage.getItem(GOAL_SPENT_STORAGE) || '[]');
-    if (Array.isArray(restored)) {
-      for (const item of restored.slice(-64)) {
-        if (typeof item === 'string' && item.length > 0 && item.length <= 500) goalSpent.add(item);
-      }
-    }
-  } catch {
-    // A corrupt/blocked sessionStorage entry costs only the reload receipt; normal ACK still works.
-  }
-
-  function goalSpentKey(conversation, token) {
-    return `${conversation}\u0000${token}`;
-  }
-
-  function goalWasSpent(conversation, token) {
-    return goalSpent.has(goalSpentKey(conversation, token));
-  }
-
-  function rememberGoalSpent(conversation, token) {
-    const key = goalSpentKey(conversation, token);
-    goalSpent.delete(key);
-    goalSpent.add(key);
-    while (goalSpent.size > 64) goalSpent.delete(goalSpent.values().next().value);
-    try {
-      sessionStorage.setItem(GOAL_SPENT_STORAGE, JSON.stringify([...goalSpent]));
-    } catch {
-      // The in-memory receipt still closes the ordinary lost-ACK window for this document.
-    }
-  }
-
+  /** Why this chat is fenced from app-authored actions, if at all. */
+  let blockReason = '';
 
   // ---- Waiting without depending on the tab being in front ----------------------------------
   //
@@ -1455,7 +1307,6 @@
     userStopped = false;
     stallReported = false;
     fiberTerminalMessageId = null;
-    bindResumeGoalTurn(open);
     return true;
   }
 
@@ -1630,28 +1481,7 @@
     pressedAt = 0;
     localError = '';
     retirementHandledFor = null;
-    // The goal loop's state belongs to the chat it was watching. None of it was cleared
-    // here, so opening a second chat inherited the first one's: its phase and its error were
-    // drawn above the new composer — "The goal loop stopped", about a conversation that is no
-    // longer on screen — and `goalTurnId` carried a finished turn's id across as the id this
-    // chat must not draft twice. The watch loop itself notices the change on its own tick and
-    // exits; what it leaves behind is what this clears.
-    goalTurnId = null;
-    goalRetries = 0;
-    goalRetryWaitMs = 0;
-    goalTicketId = null;
-    goalConfig = null;
-    goalDraft = null;
-    setGoalPhase('');
-    goalTypingSince = 0;
-    dismissedGoalStage = null;
-    // A specific goal belongs to the chat it was written for. Carrying a pending one into a
-    // different conversation would attach it to whichever chat happened to be opened next.
-    pendingObjective = '';
-    pendingObjectiveMode = 'goal';
-    pendingObjectiveSend = null;
-    objectiveBusy = false;
-    objectiveError = '';
+    blockReason = '';
     removeStagePanel();
     generating = false;
     quietSince = 0;
@@ -2182,10 +2012,7 @@
       });
     }
     if (endedTurnId) emit({ kind: 'turn_end', turnId: endedTurnId, ...result });
-    // Same moment, the other reader: the goal loop wants this turn's answer while `ended`
-    // still names its section. It decides for itself whether the turn is one to answer —
-    // and waits for it to hold still first. See noteGoalTurn.
-    noteGoalTurn(ended, result.outcome, endedTurnId);
+    // Keep the turn identity alive through this exact terminal publication before clearing it.
     turnStartedAt = 0;
     unwitnessedGeneration = false;
     genNode = null;
@@ -2217,10 +2044,6 @@
     if (id && id !== conversationId) {
       // A dispatched opening may learn its route before the provider exposes its exact
       // authored user row. Keep that operation pending; only the receipt below binds it.
-      const opening = pendingObjectiveSend?.current() ? {
-        receipt: pendingObjectiveSend, objective: pendingObjective, mode: pendingObjectiveMode, config: goalConfig
-      } : null;
-      const abandonedOpening = Boolean(pendingObjective) && !opening;
       if (conversationId) {
         // A genuine move to another *identified* chat: close the old one out and start
         // clean. The order matters — what the old chat left on screen is retired before
@@ -2239,16 +2062,6 @@
         agent = null;
         agentCommandId = null;
         resetConversation();
-        // New Chat can be reached from an older chat in the same document. Retire that
-        // old recording normally, transferring only this dispatched opening to its first
-        // elected route's epoch. Its user receipt is still required before Goal binding.
-        if (opening) {
-          pendingObjective = opening.objective;
-          pendingObjectiveMode = opening.mode;
-          goalConfig = opening.config;
-          pendingObjectiveSend = opening.receipt;
-          pendingObjectiveSend.current = submittedSendLifetime(id, epoch);
-        }
         // The same question boot asks, at the same moment boot asks it: which of this chat's
         // user messages does the app already hold? resetConversation() has just armed the
         // identity gate, and until it is answered this document reads no transcript at all,
@@ -2258,8 +2071,7 @@
       } else {
         // An id-less tab can become concrete in two very different ways: our own proven
         // opening send created this conversation, or the user opened an already-existing chat.
-        // Only the former owns a pending goal. Without that send receipt, carrying the goal here
-        // would silently attach it to whichever sidebar chat happened to be opened next.
+        // Keep the opening receipt until that distinction is proven.
         conversationId = id;
         // An id-less page can navigate into an existing running chat. Resolve
         // its durable owner before observing Stop or its hydrated question, just
@@ -2271,49 +2083,9 @@
         void bindConversation(id).then(() => {
           if (alive && conversationId === id && epoch === boundEpoch) return pullActivity();
         });
-        if (abandonedOpening) {
-          pendingObjective = '';
-          pendingObjectiveMode = 'goal';
-          pendingObjectiveSend = null;
-          goalConfig = null;
-          goalDraft = null;
-          objectiveError = '';
-          setGoalPhase('');
-          removeStagePanel();
-        }
       }
     }
     flushStreamRequestOrigins();
-    // Route assignment and authored text can arrive in either order. This receipt is
-    // evaluated on the existing observer, rather than only on the one route-change edge.
-    if (id && pendingObjectiveSend?.accepted && pendingObjectiveSend.current()) {
-      const users = CLF_DOM.messages().filter(message => message.role === 'user');
-      if (users.length === 1 && matchesSubmittedUser(users[0], pendingObjectiveSend.text)) {
-        const carried = pendingObjective;
-        const carriedMode = pendingObjectiveMode;
-        const boundEpoch = epoch;
-        pendingObjective = '';
-        pendingObjectiveMode = 'goal';
-        pendingObjectiveSend = null;
-        // The mode goes with it, and this is the only request that can carry it: from here on
-        // the chat has an id, and anything that asks the app which mode to use gets the
-        // standing switch's answer rather than the one the user actually chose.
-        void ask({ type: 'goal_objective', conversationId: id, text: carried, mode: carriedMode }).then((reply) => {
-          if (!alive || epoch !== boundEpoch || conversationId !== id) return;
-          if (reply && reply.ok === true) {
-            const stored = reply.data && typeof reply.data.objective === 'string' ? reply.data.objective : carried;
-            const switched =
-              reply.data && typeof reply.data.mode === 'string' && typeof reply.data.enabled === 'boolean'
-                ? { enabled: reply.data.enabled, mode: reply.data.mode, own: true }
-                : null;
-            goalConfig = { ...(goalConfig || {}), ...(switched || {}), objective: stored };
-          } else {
-            objectiveError = replyError(reply) || 'the goal could not be saved to this chat';
-          }
-          injectStage();
-        });
-      }
-    }
 
     // `/c/A` -> `/` is ambiguous by itself: ChatGPT uses that shape both for transient
     // router churn in A and while opening a genuinely fresh chat B. What is never safe is
@@ -2324,9 +2096,7 @@
     if (!id && conversationId) {
       // The route no longer proves that the composer on screen belongs to this chat, and A's
       // presentation must not stay mounted over an unbound New Chat composer. That decision
-      // belongs to injectStage() alone, which asks the same question every tick and knows the
-      // one id-less case worth painting: a chat being opened on a goal, whose opening message
-      // is being written right now. Tearing the panel down here as well made every tick
+      // belongs to injectStage() alone, which asks the same question every tick. Tearing the panel down here as well made every tick
       // destroy and rebuild the node injectStage() had just put back — a fresh element once a
       // second, so its progress animation never survived long enough to play a single cycle.
       void flush();
@@ -2379,10 +2149,6 @@
     const newUserMessage = submission?.messageId || claimUnrecordedGeneration(nowGenerating, observedTurns);
     if (newUserMessage) {
       fiberTerminalMessageId = null;
-      // A terminal Goal card explains the answer immediately before this user message.
-      // Once the user has continued manually it is history, not current composer state.
-      // Remember its key just like an X click so the next activity repaint cannot revive it.
-      dismissTerminalGoalStage();
     }
     if (!nowGenerating) fiberTerminalMessageId = null;
 
@@ -2451,7 +2217,6 @@
       genCount++;
       turnId = `g-${RUN_ID}-${epoch}-${genCount}`;
       unwitnessedGeneration = false;
-      bindResumeGoalTurn(turnId);
       genNode = null;
       // Exclude history as it stood at Send, before a fast answer could mount.
       // Without a witnessed Send, retain the previous observation's baseline.
@@ -2689,7 +2454,6 @@
     // generation ever binds to a section further back than that.
     baselineSections = assistantSections(observedTurns);
     baselineMarks = baselineSections.slice(-3).map((node) => ({ node, mark: sectionMark(node) }));
-    maybeRecoverResumeGoalTurn();
     // A revival can be waiting outside the command lease while this exact turn settles. Its
     // readiness depends partly on recorder state (`generating`, pending tools/native work), not
     // only DOM mutations, so wake those waiters whenever an observation publishes a new view of
@@ -2848,7 +2612,7 @@
       // candidate in a microtask immediately. `observe()` still fails closed on transient Stop
       // dropouts, and Fiber `end_turn` remains the exact early-completion proof, so this does not
       // revive the old interrupted-marker false positive. It only removes a throttled timer from
-      // the path that starts turn_end -> Goal in a hidden tab.
+      // the hidden-tab terminal observation path.
       if (timer !== null) return;
       // Streaming Markdown can mutate once per token and a virtualized history mount can
       // deliver hundreds of DOM records in one navigation. Running the full conversation
@@ -3897,7 +3661,7 @@
     if (requestedLiveOwner && generating && requestedLiveOwner.localTurnId === turnId) renderStreams();
     // An idle virtualized-history mount needs exact native placement, not a second recorder
     // observation. A previously recorded request id can resolve settledTurnOwner() and make an
-    // old final look activeNow/Goal-eligible even though no generation is open. Stop after the
+    // old final look active even though no generation is open. Stop after the
     // same route/epoch-validated Fiber snapshot has updated presentation identity.
     if (presentationOnly) return true;
     CLF_DOM.presentUserPrompts?.(message => userMessageSource(message)?.text ?? null);
@@ -4258,11 +4022,7 @@
           ...(!liveAssistant && message.createTime ? { time: message.createTime, authoredTime: true } : {}),
           ...(liveAssistant && (state === 'final' || (freshPublication && priorMessage?.text !== message.rawText)) ? { activeNow: true } : {}),
           state,
-          final: state === 'final',
-          ...(state === 'final' && localOwner && goalTerminalCandidate('completed', localOwner, markedTurns.some(([, marked]) =>
-              marked.kind === 'HANDOFF' && marked.answer === turn))
-            ? { goalEligible: true }
-            : {})
+          final: state === 'final'
         });
         if (state === 'final' && localOwner && notePresentation(message.messageId, message.rawText)) {
           // The page has produced a newer exact revision than the app-owned renderer can
@@ -6056,15 +5816,7 @@
 
   let settingsPulling = false;
 
-  /**
-   * The two settings, read without a conversation to read them from.
-   *
-   * Only for the id-less case. Everywhere else /activity carries the same fields plus the
-   * ones that are per chat — the objective, the block, the draft — and taking them from here
-   * instead would quietly drop those. The goal typed into a New Chat is this tab's own until
-   * ChatGPT issues an id, so it is layered back on rather than read from an app that has
-   * nowhere to store it yet.
-   */
+  /** Read composer settings for an id-less New Chat. */
   async function pullSettings() {
     if (settingsPulling) return;
     settingsPulling = true;
@@ -6072,16 +5824,7 @@
       const reply = await ask({ type: 'settings_get' });
       if (!alive || CLF_DOM.conversationId() || !reply || reply.ok !== true || !reply.data) return;
       context = readContext(reply.data.context) || context;
-      if (reply.data.goal && typeof reply.data.goal === 'object') {
-        goalConfig = {
-          ...reply.data.goal,
-          objective: pendingObjective,
-          // A goal held here is a chat being opened right now, and the mode it was opened in
-          // is this tab's to state: the app answered with the app-wide switch, which has no
-          // opinion about a conversation that does not exist yet.
-          ...(pendingObjective ? { enabled: true, mode: pendingObjectiveMode } : {})
-        };
-      }
+      blockReason = '';
       renderControl();
       renderMenu();
     } finally {
@@ -6092,10 +5835,7 @@
   async function pullActivity() {
     if (!CLF_DOM.conversationId()) {
       // A New Chat has no feed: /activity is addressed by conversation, and this composer is
-      // in none. The sheet above it still has to say what the settings are, because a goal
-      // can be written here and the first message is what the goal produces. Deliberately
-      // read off the route rather than the id this tab is holding — that id belongs to the
-      // chat before this composer, and so does its goal. See composerChat().
+      // in none. Read the app-wide context settings instead of borrowing the prior chat's state.
       await pullSettings();
       return;
     }
@@ -6271,12 +6011,7 @@
       }
       tokens = Number.isFinite(Number(data.tokens)) ? Number(data.tokens) : 0;
       context = readContext(data.context);
-      // The goal loop's settings and, while one is running, the draft itself: its stage, the
-      // text OpenRouter has streamed so far, and — once it is `ready` — the message to type.
-      // Nothing is typed here; maybeSendGoalReply below owns that, after the pull has
-      // finished and the page has been repainted with what the draft is doing.
-      goalConfig = data.goal && typeof data.goal === 'object' ? data.goal : null;
-      if (goalConfig) goalDraft = goalConfig.draft || null;
+      blockReason = typeof data.blocked === 'string' ? data.blocked : '';
       const nextBootstrap = data.bootstrap === 'resume' || data.bootstrap === 'worker' ? data.bootstrap : null;
       bootstrapOwner = nextBootstrap && typeof data.bootstrapMessageId === 'string' && data.bootstrapMessageId
         ? { conversationId: forId, epoch: forEpoch, messageId: data.bootstrapMessageId } : null;
@@ -6314,7 +6049,7 @@
       renderControl();
       injectStage();
       // The activity snapshot is now authoritative and visible. Arm the next read before
-      // compaction or Goal side effects below can wait on the page for tens of seconds.
+      // compaction side effects below can wait on the page for tens of seconds.
       armNextActivityPull();
     } finally {
       pulling = false;
@@ -6323,11 +6058,6 @@
     // same endpoint while it works, so firing it with `pulling` still set would deadlock
     // the run against the poll that started it.
     if (current() && CLF_DOM.conversationId() === forId) await maybeResumePendingCompaction(forId, forEpoch);
-    if (current() && CLF_DOM.conversationId() === forId) maybeRecoverResumeGoalTurn();
-    if (current() && CLF_DOM.conversationId() === forId) maybeRecoverDurableGoalTurn();
-    // Same reason, same place: this types into the composer and can wait on the page, and it
-    // needs the draft this pull just delivered.
-    if (current() && CLF_DOM.conversationId() === forId) await maybeSendGoalReply();
   }
 
   // ------------------------------------------------------- composer control
@@ -6424,12 +6154,11 @@
       };
     }
     if (!conversationId) {
-      // Off, not hidden: there is nothing to compact yet, and the sheet behind this button is
-      // still where a goal is written — which is the one thing that can start the chat.
+      // Off, not hidden: there is nothing to compact yet.
       return {
         mode: 'off',
         label: 'Compact',
-        hint: 'Nothing to compact yet — send a message, or set a goal and it writes one.',
+        hint: 'Nothing to compact yet — send a message first.',
         action: 'none'
       };
     }
@@ -6444,245 +6173,28 @@
    * watching it. The hover line is the same information in one breath, for the far commoner
    * case of wanting to know rather than to change.
    *
-   * `context` and `goal` both come from the app on every poll, so this never reports a
-   * setting from memory — a change made in the app's own window shows up here within a tick.
-   *
-   * `scope` is which of the two composers this sheet is sitting above, and it is the route's
-   * answer rather than the id this tab is holding — see composerChat(). Above a New Chat the
-   * two switches are gone: they move the app-wide default there, having no chat to belong to,
-   * while the goal written in the same sheet starts a chat immediately. Those two scopes read
-   * as one control and are not, which is how an unattended run got started as a Goal by
-   * somebody who had come to the sheet to start a Loop.
+   * `context` comes from the app on every poll, so this never reports a setting from memory —
+   * a change made in the app's own window shows up here within a tick.
    */
   function settingsView(input) {
-    const { context, goal, compact, editing, editingMode, scope } = input;
-    // A composer with no chat behind it yet. Everything conversation-scoped is absent here by
-    // construction, and the two switches are not conversation-scoped, which is the point.
-    const fresh = scope === 'new';
-    // `context.auto` is the global preference. Worker chats are a role-level exception: their
-    // conversation id is the worker identity, so Compact & Resume is never available there.
-    // Keep the sheet truthful even if a generic /settings refresh races the worker-scoped
-    // /activity projection and briefly hands this page the global auto=true value.
-    const blocked = goal && typeof goal.blocked === 'string' ? goal.blocked : '';
-    // The two reasons that take every one of these controls away, not only the loop: a
-    // worker chat (the prime writes it) and a chat the user blocked in the app (its tools are
-    // refused, so nothing this app types may drive it on). 'continued' is neither — that chat
-    // is finished, and its controls are moot rather than fenced.
+    const { context, compact, blocked = '' } = input;
     const fenced = blocked === 'worker' || blocked === 'blocked';
     const auto = Boolean(context && context.auto) && !fenced;
     const threshold = context && context.threshold > 0 ? context.threshold : 0;
-    // One setting, one control. The app sends the mode beside `enabled`, so there is a single
-    // value to read and the slider can only ever be in one of its three positions.
-    const mode = goal && goal.mode === 'loop' ? 'loop' : 'goal';
-    const goalOn = Boolean(goal && (goal.configuredEnabled ?? goal.enabled)) && mode === 'goal';
-    const loopOn = Boolean(goal && (goal.configuredEnabled ?? goal.enabled)) && mode === 'loop';
-    // Whether this chat has moved its own switch, which is what tells an Off somebody chose
-    // here from an Off inherited from the app-wide setting. Only the second lets a saved goal
-    // speak for the chat — see goalArmedFor() in src/main/goal.ts, which this mirrors.
-    const own = Boolean(goal && goal.own);
-    const hasKey = Boolean(goal && goal.hasKey);
-    const objective = goal && typeof goal.objective === 'string' ? goal.objective : '';
-    // The app's own reason, rather than this tab's guess. Today there is exactly one: a
-    // worker chat, where the prime already writes the user's turns.
     const from = threshold > 0 ? `from ${roundK(threshold)} tokens` : '';
-    // Is anything driving this chat at all? A saved goal is enough on its own, but only for a
-    // chat that has never moved its own switch — the same rule the app applies.
-    const armed = own ? goalOn || loopOn : goalOn || loopOn || Boolean(objective);
-    const running = armed && hasKey && !blocked;
-    // Which instruction would actually drive this chat, which is not the same question as
-    // which switch is on. A chat that runs only because it carries a goal, with the standing
-    // switch off, is driven as a Goal and may therefore stop. This mirrors goalDrivingMode()
-    // in src/main/goal.ts exactly, and it is what the task editor below is labelled from — a
-    // sheet that named the mode differently from the app would be worse than naming none.
-    const driving = loopOn ? 'loop' : 'goal';
-    // The slider's position: the one word for everything above. Off is a real position and not
-    // merely "neither switch", which is why `armed` and not `enabled` decides it.
-    const position = blocked ? 'off' : !armed ? 'off' : loopOn ? 'loop' : 'goal';
     return {
-      // Two short lines rather than a sentence: this is read while reaching for something
-      // else, and the only questions it answers are "is it on" and "at what point".
-      tip: [
-        auto ? `Auto-compaction on${from ? `, ${from}` : ''}` : 'Auto-compaction off',
-        blocked === 'worker'
-          ? 'Goal off — the prime writes this chat'
-          : blocked === 'blocked'
-            ? 'Goal off — this chat is blocked in the app'
-            : fresh
-            ? !hasKey
-              ? 'No API key — Goal and Loop unavailable'
-              : objective
-                ? 'Opening this chat on its goal'
-                : 'Add a goal or a loop to start this chat'
-            : position === 'off'
-              ? 'Goal and Loop off'
-              : position === 'loop'
-                ? hasKey
-                  ? 'Loop on — never stops on its own'
-                  : 'Loop on — no API key'
-                : hasKey
-                  ? objective
-                    ? 'Goal on — chasing this chat’s goal'
-                    : 'Goal on'
-                  : 'Goal on — no API key'
-      ].join('\n'),
-      rows: [
-        {
-          key: 'autoCompact',
-          label: 'Auto-compaction',
-          note:
-            blocked === 'worker'
-              ? 'off here: worker chats never auto-compact'
-              : blocked === 'blocked'
-                ? 'off here: this chat is blocked in the app'
-                : auto
-                  ? from || 'threshold set in the app'
-                  : 'compact this chat by hand',
-          on: auto,
-          warn: false,
-          disabled: fenced
-        }
-      ],
-      /**
-       * Off, Goal, Loop — one control, because it was always one setting.
-       *
-       * Drawn as two switches it was possible to read the sheet as offering two independent
-       * things that happened to cancel each other, and an unattended run got started as a Goal
-       * by somebody who had come here to start a Loop. A slider cannot say that: it has one
-       * handle, three stops, and the stop it is at is the mode this chat runs in.
-       *
-       * Every note under it is a few words wide on purpose. The sheet is a fixed-size thing
-       * hanging off a composer, and a note long enough to wrap made the whole panel change
-       * height the moment somebody moved the handle.
-       *
-       * Absent above a New Chat: there is no chat for a mode to belong to, and the two links
-       * below carry the mode with them there instead.
-       */
-      mode: fresh
-        ? null
-        : {
-            value: position,
-            options: [
-              { value: 'off', label: 'Off', hint: 'Nothing is written here on its own.' },
-              {
-                value: 'goal',
-                label: 'Goal',
-                hint: `Replies as you until this chat’s goal is reached, then stops. Written with ${modelLabel(goal && goal.model)}.`
-              },
-              {
-                value: 'loop',
-                label: 'Loop',
-                hint: `Replies as you for ever — only this slider ends it. Written with ${modelLabel(goal && goal.model)}.`
-              }
-            ],
-            // The one line under the slider: what the position it is at actually does. The
-            // missing key and the worker rule are said here too, because they are the answer
-            // to the only question somebody reaching for this control has.
-            note:
-              blocked === 'worker'
-                ? 'the prime writes here'
-                : blocked === 'blocked'
-                  ? 'blocked in the app'
-                  : !hasKey
-                  ? 'OpenRouter key required'
-                  : position === 'loop'
-                    ? 'replies for ever'
-                    : position === 'goal'
-                      ? 'replies until goal reached'
-                      : 'no replies written here',
-            warn: !hasKey || fenced,
-            disabled: fenced
-          },
-      /**
-       * The one task, and — above a New Chat only — the mode it is written in.
-       *
-       * Goal and Loop share it. They are the same instruction read two ways: chase this, and
-       * stop when it is reached, or chase this and never stop. So sliding from one to the other
-       * keeps the sentence that was written; the slider above owns the mode, and this owns the
-       * words, and neither can quietly answer for the other.
-       *
-       * A New Chat has no slider, because it has no chat for a mode to belong to. There the two
-       * links are the whole decision, and they carry their mode with them into the chat they
-       * are about to start.
-       */
-      objective: {
-        text: objective,
-        editing: Boolean(editing),
-        /**
-         * What Save is about to write this task as.
-         *
-         * In a chat the slider owns it, not the link that opened the editor — an editor left
-         * open while the handle moves must not save into the mode the sheet has stopped being
-         * in. Above a New Chat there is no slider, so there the link that was pressed is the
-         * only thing that knows.
-         */
-        mode: fresh ? (editingMode === 'loop' ? 'loop' : 'goal') : driving,
-        /**
-         * May this editor save at all? Off is not a mode a task can be written into, and an
-         * open editor is the one way a save could otherwise reach past an Off and switch the
-         * chat back on behind the slider that had just turned it off.
-         */
-        savable: fresh || position !== 'off',
-        /** Shown instead of the links once a goal exists, so it can be read without opening it. */
-        summary: objective ? clampLine(objective, 120) : '',
-        /** The mode this chat is being driven in right now, so the editor saves into it. */
-        driving,
-        actions: fresh
-          ? [
-              {
-                mode: 'goal',
-                label: 'add specific goal',
-                hint: 'Write what this chat has to reach. It then prompts until it is reached, and stops there.'
-              },
-              {
-                mode: 'loop',
-                label: 'add specific loop',
-                hint: 'Write what this chat has to reach. It then prompts for ever — nothing but the Loop slider ends it.'
-              }
-            ]
-          : [
-              {
-                // One link in a chat, whatever the mode. The text and the mode have distinct
-                // owners here: this editor changes the words, the slider changes how they run.
-                // Two links would offer the mode a second time and let a text save masquerade
-                // as a mode switch.
-                mode: driving,
-                label: objective ? 'edit task' : 'add task',
-                // Off is not a mode this task could be saved into, so it is not offered as one.
-                // Picking Goal or Loop first is the same order the slider reads in.
-                disabled: position === 'off',
-                hint:
-                  position === 'off'
-                    ? 'Pick Goal or Loop above first — Off writes nothing.'
-                    : objective
-                      ? `Change or clear what this chat has to reach. It runs as ${driving === 'loop' ? 'Loop' : 'Goal'}.`
-                      : `Write what this chat has to reach. It runs as ${driving === 'loop' ? 'Loop' : 'Goal'}.`
-              }
-            ],
-        available: hasKey && !blocked,
-        unavailable:
-          blocked === 'worker'
-            ? 'A worker chat is already driven by its prime.'
-            : blocked === 'blocked'
-              ? 'This chat is blocked in the app. Release it there to drive it again.'
-              : !hasKey
-              ? 'Add an OpenRouter API key in the app first.'
-              : ''
-      },
-      // The button's old job, kept as a row rather than dropped: pressing the gear must not
-      // have cost anybody the one thing it used to do.
+      tip: auto ? `Auto-compaction on${from ? `, ${from}` : ''}` : 'Auto-compaction off',
+      rows: [{
+        key: 'autoCompact', label: 'Auto-compaction',
+        note: blocked === 'worker' ? 'off here: worker chats never auto-compact'
+          : blocked === 'blocked' ? 'off here: this chat is blocked in the app'
+            : auto ? from || 'threshold set in the app' : 'compact this chat by hand',
+        on: auto, warn: false, disabled: fenced
+      }],
       action: {
-        label:
-          fenced
-            ? 'Compact & resume unavailable'
-            : compact.action === 'cancel'
-              ? 'Cancel compaction'
-              : 'Compact & resume now',
-        hint:
-          blocked === 'worker'
-            ? 'Worker chats stay in their existing conversation and are never manually compacted or resumed.'
-            : blocked === 'blocked'
-              ? 'A blocked chat is never compacted or resumed: the replacement chat would run without its tools. Release it in the app first.'
-              : compact.hint,
+        label: fenced ? 'Compact & resume unavailable' : compact.action === 'cancel' ? 'Cancel compaction' : 'Compact & resume now',
+        hint: blocked === 'worker' ? 'Worker chats stay in their existing conversation and are never manually compacted or resumed.'
+          : blocked === 'blocked' ? 'A blocked chat is never compacted or resumed. Release it in the app first.' : compact.hint,
         action: fenced ? 'none' : compact.action
       }
     };
@@ -6996,7 +6508,7 @@
     blocked.textContent = 'Chat blocked';
     blocked.setAttribute(
       'data-clf-tip',
-      'This chat is blocked in the Chat On Steroids app: its tool calls are refused and Goal, Loop and auto-compaction are off. To release it, open the app’s Chat tab, hover this chat in the sessions list and press its block symbol.'
+      'This chat is blocked in the Chat On Steroids app: its tool calls are refused and auto-compaction is off. To release it, open the app’s Chat tab, hover this chat in the sessions list and press its block symbol.'
     );
     blocked.hidden = true;
 
@@ -7036,10 +6548,8 @@
    * it cannot be interrupted by a repaint.
    */
   function injectControl() {
-    // A brand-new ChatGPT tab used to have nothing to offer — nothing to compact, no feed to
-    // read, and a disabled "send a message first" button is not worth half a composer. It has
-    // something now: a goal written here is what writes the chat's first message, so the sheet
-    // has to be reachable before there is a chat. Compaction stays unavailable and says why.
+    // Keep the settings control reachable on a brand-new ChatGPT tab even though compaction
+    // itself remains unavailable until the chat has a conversation id.
     const spot = CLF_DOM.composerActions();
     if (!spot || !spot.host) return;
     if (!control || !control.root.isConnected) {
@@ -7124,25 +6634,12 @@
    */
   async function setSetting(key, on) {
     if (menuBusy) return;
-    if (
-      key === 'autoCompact' &&
-      goalConfig &&
-      (goalConfig.blocked === 'worker' || goalConfig.blocked === 'blocked')
-    ) {
-      return;
-    }
+    if (key === 'autoCompact' && (blockReason === 'worker' || blockReason === 'blocked')) return;
     menuBusy = true;
     renderMenu();
     try {
-      const reply = await ask({
-        type: 'settings_set',
-        ...(conversationId ? { conversationId } : {}),
-        [key]: on
-      });
-      if (reply && reply.ok === true && reply.data) {
-        context = readContext(reply.data.context) || context;
-        if (reply.data.goal) goalConfig = { ...(goalConfig || {}), ...reply.data.goal };
-      }
+      const reply = await ask({ type: 'settings_set', ...(conversationId ? { conversationId } : {}), [key]: on });
+      if (reply && reply.ok === true && reply.data) context = readContext(reply.data.context) || context;
     } finally {
       menuBusy = false;
       renderMenu();
@@ -7151,283 +6648,8 @@
     void pullActivity();
   }
 
-  /**
-   * Moves the mode slider, which is still the two switches the app owns underneath.
-   *
-   * Goal and Loop are one write each and the app turns the other off. Off is the write that
-   * used to have no button: whichever of the two is on goes off, and a chat that is running
-   * only on its saved task names Goal, because that is the mode a task alone runs in. Either
-   * way the write is chat-scoped, so the app records this chat's own answer — which is what
-   * makes Off mean off here rather than deferring to the task still saved beside it.
-   */
-  async function setMode(next, now) {
-    if (menuBusy || next === now) return;
-    if (next === 'goal') return void setSetting('goal', true);
-    if (next === 'loop') return void setSetting('loop', true);
-    return void setSetting(now === 'loop' ? 'loop' : 'goal', false);
-  }
-
   function menuView() {
-    // The route, not the id this tab is still holding. Clicking New Chat leaves that id in
-    // place on purpose (see composerChat), so a sheet drawn from it would keep offering the
-    // previous chat's switches — and its goal — above a composer that belongs to no chat at
-    // all. `moving` counts as a chat: the switches are drawn, and saving into it is refused
-    // by name rather than by silently writing somewhere.
-    const where = composerChat();
-    const fresh = where.state === 'new';
-    return settingsView({
-      context,
-      // Above a New Chat the only goal that exists is the one this tab is holding until
-      // ChatGPT issues an id. Layered here as well as in pullSettings so the sheet is right
-      // on the frame the route changes, rather than one activity poll later.
-      goal: fresh && goalConfig ? { ...goalConfig, objective: pendingObjective, blocked: '' } : goalConfig,
-      compact: currentState(),
-      editing: menuEditing,
-      editingMode: menuMode,
-      scope: fresh ? 'new' : 'chat'
-    });
-  }
-
-  /**
-   * The specific-goal editor, open or closed, and what is in it while open.
-   *
-   * Held out here rather than read back off the textarea, because renderMenu() rebuilds the
-   * sheet from scratch on every write and would otherwise throw away half a typed sentence
-   * the moment anything else in the sheet changed.
-   */
-  let menuEditing = false;
-  let menuDraft = '';
-  /**
-   * Which of the two links opened the editor, and therefore what Save will do.
-   *
-   * Held beside the draft rather than read back off the sheet for the same reason the draft
-   * is: a change in what the sheet says rebuilds it, and the mode is the half of this
-   * decision that cannot be recovered from the text.
-   */
-  let menuMode = 'goal';
-
-  function openObjectiveEditor(current, mode) {
-    menuEditing = true;
-    menuDraft = current;
-    menuMode = mode === 'loop' ? 'loop' : 'goal';
-    objectiveError = '';
-    renderMenu();
-    const box = menuNode && menuNode.querySelector('[data-clf-goal-input]');
-    if (box) {
-      box.focus();
-      box.setSelectionRange(box.value.length, box.value.length);
-    }
-  }
-
-  function closeObjectiveEditor() {
-    menuEditing = false;
-    menuDraft = '';
-    renderMenu();
-  }
-
-  /**
-   * Saves this chat's goal and, if it can, starts on it immediately.
-   *
-   * "Immediately" is the point of the feature. Somebody who has just written down where a
-   * chat has to get to should not then have to write its first message as well, and in a
-   * chat already under way they should not have to wait for a turn that may never come. So
-   * saving is also a start signal, and the two shapes it takes are the two shapes a chat can
-   * be in: one that ChatGPT has named, and one that it has not.
-   *
-   * `mode` travels with the text, all the way to the durable per-chat switch the app writes
-   * before it stores the goal. It is not a preference being recorded on the side: it is the
-   * difference between a run that may decide it is finished and one that may not, and the
-   * only place that decision is unambiguously present is the button that was pressed.
-   */
-  async function saveObjective(text, mode) {
-    if (objectiveBusy) return;
-    const which = mode === 'loop' ? 'loop' : 'goal';
-    const goal = String(text || '').trim();
-    objectiveBusy = true;
-    objectiveError = '';
-    renderMenu();
-    try {
-      const where = composerChat();
-      if (where.state === 'moving') {
-        // The route names a chat this tab has not observed yet. Neither id is safe to write
-        // into, and the next observation is a tick away.
-        objectiveError = 'this chat is still opening — try again';
-        return;
-      }
-      if (where.state === 'new') {
-        // A New Chat. There is no id to save against yet, so the goal is held here and the
-        // opening message is asked for directly; sending it is what makes ChatGPT issue the
-        // id that the goal is then bound to. See the pendingObjective binding in observe().
-        if (!goal) {
-          pendingObjective = '';
-          pendingObjectiveMode = 'goal';
-          pendingObjectiveSend = null;
-          return;
-        }
-        await openWithObjective(goal, which);
-        return;
-      }
-      const reply = await ask({ type: 'goal_objective', conversationId: where.id, text: goal, mode: which });
-      if (!reply || reply.ok !== true) {
-        objectiveError = replyError(reply) || 'the app did not answer';
-        return;
-      }
-      const stored = reply.data && typeof reply.data.objective === 'string' ? reply.data.objective : goal;
-      // The switch the app just pinned, taken from its answer rather than assumed from the
-      // button: what the sheet draws is what was actually written down.
-      // Pinning the mode is this chat answering for itself, so the sheet stops reading the saved
-      // task as the thing that speaks for it — which is what makes a clear here land on Off.
-      const switched =
-        reply.data && typeof reply.data.mode === 'string' && typeof reply.data.enabled === 'boolean'
-          ? { enabled: reply.data.enabled, mode: reply.data.mode, own: true }
-          : null;
-      goalConfig = { ...(goalConfig || {}), ...(switched || {}), objective: stored };
-      menuEditing = false;
-      menuDraft = '';
-      if (!stored) return;
-      // A chat that is idle right now would otherwise sit on its new goal until ChatGPT
-      // happened to finish a turn of its own — which, in a chat nobody is typing into, is
-      // never. The turn key is the save, so a second save writes a second message and a
-      // retried one does not.
-      if (!generating && !CLF_DOM.generating() && !goalBusy && !nativeBusy && !(job && job.busy)) {
-        goalTurnId = `objective-${Date.now().toString(36)}`;
-        goalRetries = 0;
-        setGoalPhase('');
-        const forId = conversationId;
-        const forEpoch = epoch;
-        const forTurn = goalTurnId;
-        goalBusy = true;
-        try {
-          await requestGoalDraft(forTurn, () => alive && conversationId === forId && epoch === forEpoch && goalTurnId === forTurn);
-        } finally {
-          goalBusy = false;
-        }
-      }
-    } finally {
-      objectiveBusy = false;
-      renderMenu();
-      renderControl();
-      injectStage();
-    }
-  }
-
-  /**
-   * Writes and sends the first message of a chat that has no id yet.
-   *
-   * The one goal draft that is not streamed onto the activity feed, because /activity is
-   * addressed by conversation and this chat has no address. It is a plain awaited request,
-   * and the panel above the composer is driven from here rather than from a polled draft —
-   * the run is still visible, it is simply this tab reporting it rather than the app.
-   */
-  /**
-   * Whether asking for this opening again could answer differently.
-   *
-   * The app says so itself for the refusals it owns, and a deadline says it by being one: the
-   * request outlived the wait rather than being turned down. Everything else — no key, no
-   * objective, a model that refused the goal — is a decision, and repeating it only spends
-   * somebody's credit on the same answer.
-   */
-  function openRetryable(reply) {
-    if (!reply || reply.ok === true) return false;
-    if (reply.retryable === true || (reply.data && reply.data.retryable === true)) return true;
-    return reply.status === 0 && reply.error !== 'app_not_found';
-  }
-
-  async function openWithObjective(goal, mode) {
-    const openingEpoch = epoch;
-    pendingObjective = goal;
-    pendingObjectiveMode = mode === 'loop' ? 'loop' : 'goal';
-    pendingObjectiveSend = null;
-    // Enough of a config for the panel to draw: the model comes back with the reply, so
-    // until then it says "the model", which is what modelLabel('') is for. The mode is this
-    // tab's own claim until the app answers with what it stored — drawn from the button that
-    // was pressed rather than from the standing switch, which is what the whole change is for.
-    goalConfig = {
-      ...(goalConfig || { hasKey: true, model: '' }),
-      enabled: true,
-      mode: pendingObjectiveMode,
-      objective: goal
-    };
-    menuEditing = false;
-    menuDraft = '';
-    closeMenu();
-    setGoalPhase('requesting');
-    // Asked again on a retryable refusal, on the same quarter-minute clock as the in-chat
-    // loop and with the same absence of an attempt limit. A goal opening is a single request
-    // holding a whole model completion, and there is no later turn for the ordinary Goal loop
-    // to try again from: a rate limit that outlives a few seconds — the usual kind — used to
-    // land the whole run on the one attempt the user made and paint "stopped" over it. The
-    // only things that end this loop are the ones that end the in-chat one: the app refusing
-    // for a settled reason, the composer no longer being this empty New Chat, or a different
-    // goal saved over this one.
-    let reply = null;
-    const current = () => alive && epoch === openingEpoch && composerChat().state === 'new' &&
-      pendingObjective === goal && pendingObjectiveMode === (mode === 'loop' ? 'loop' : 'goal') && goalConfig?.enabled === true;
-    for (;;) {
-      // The mode as well, because there is no chat yet to hold a switch: this request is the
-      // only thing that knows which instruction the opening message is being written under.
-      reply = await ask({ type: 'goal_open', text: goal, mode: pendingObjectiveMode });
-      if (!current() || (reply && reply.ok === true) || !openRetryable(reply)) break;
-      setGoalPhase('retrying', replyError(reply) || 'the app did not answer');
-      await sleep(GOAL_RETRY_MS);
-      if (!current()) break;
-      setGoalPhase('requesting');
-    }
-    if (!current()) {
-      // A newer goal was saved over this one while it waited; its own request owns the state now.
-      if (epoch !== openingEpoch || pendingObjective !== goal) return;
-      // This request never proved that *our* opening message was sent. The route may now be an
-      // unrelated existing chat the user selected while generation was in flight, so discard the
-      // pending ownership claim rather than letting a later observer bind it there.
-      pendingObjective = '';
-      pendingObjectiveMode = 'goal';
-      pendingObjectiveSend = null;
-      goalConfig = null;
-      setGoalPhase('');
-      return;
-    }
-    if (!reply || reply.ok !== true) {
-      objectiveError = replyError(reply) || 'the app did not answer';
-      setGoalPhase('requesting', objectiveError);
-      return;
-    }
-    const opening = reply.data && typeof reply.data.reply === 'string' ? reply.data.reply : '';
-    if (reply.data && typeof reply.data.model === 'string') goalConfig.model = reply.data.model;
-    if (!opening) {
-      setGoalPhase('requesting', 'the model wrote nothing to open with');
-      return;
-    }
-    setGoalPhase('sending');
-    const previousComposer = CLF_DOM.composer()?.textContent || '';
-    if (!CLF_DOM.insertPrompt(opening, true)) {
-      setGoalPhase('sending', 'ChatGPT would not replace the New Chat draft');
-      return;
-    }
-    const preparedOpening = CLF_DOM.composer()?.textContent || '';
-    await sleep(200);
-    if (!current()) {
-      if (alive && epoch === openingEpoch && CLF_DOM.composer()?.textContent === preparedOpening)
-        CLF_DOM.insertPrompt(previousComposer, true);
-      return;
-    }
-    // Programmatic sends do not reliably bubble the synthetic button click through the
-    // document listener in every ChatGPT renderer. Mint the same receipt explicitly at the
-    // irreversible boundary so the first user row can open its local generation.
-    rememberUserSend();
-    const openingSend = { text: opening, current: submittedSendLifetime(null, openingEpoch), accepted: false };
-    const sendingTarget = () => pendingObjectiveSend === openingSend && openingSend.current() &&
-      pendingObjective === goal && goalConfig?.enabled === true && pendingObjectiveMode === (mode === 'loop' ? 'loop' : 'goal');
-    pendingObjectiveSend = openingSend;
-    const sent = await sendSubmittedText(sendingTarget);
-    if (!sendingTarget()) return;
-    if (!sent) {
-      pendingObjectiveSend = null;
-      setGoalPhase('sending', 'ChatGPT would not send the message');
-      return;
-    }
-    openingSend.accepted = true;
-    setGoalPhase('');
-    observe();
+    return settingsView({ context, compact: currentState(), blocked: composerChat().state === 'chat' ? blockReason : '' });
   }
 
   function renderMenu() {
@@ -7435,33 +6657,11 @@
     if (!control || !control.root.isConnected) return void closeMenu();
     const root = menuElement();
     const view = menuView();
-    // Everything the sheet is drawn from: the view, and the three pieces of local state the
-    // view does not carry because they are this tab's rather than the app's. The draft is
-    // deliberately absent — the textarea already holds it, and Save is kept in step by the
-    // input listener, so typing a goal repaints nothing.
-    const painted = JSON.stringify([view, menuBusy, objectiveBusy, objectiveError,
-      goalConfig?.proLoopDelivery, goalConfig?.afterTurn]);
-    // Unchanged, so the sheet on screen is already the right sheet. Only its position is
-    // still worth re-deciding: the composer it hangs off moves as ChatGPT grows it.
+    const painted = JSON.stringify([view, menuBusy]);
     if (painted === menuPainted && root.firstChild) return void placeMenu(root, control.button);
     menuPainted = painted;
-    // A rebuild can still land while somebody is halfway through typing a goal, because the
-    // app can change what the sheet says at any moment. The text itself survives in menuDraft;
-    // the caret and the focus have to be carried by hand, or the sentence being written jumps
-    // to its end.
-    const typing = root.querySelector('[data-clf-goal-input]');
-    const caret =
-      typing && document.activeElement === typing
-        ? { start: typing.selectionStart, end: typing.selectionEnd }
-        : null;
-    // Where the box was scrolled to, kept whether or not it has the focus. A goal long enough
-    // to scroll is exactly the one somebody reads back before saving, and a rebuilt textarea
-    // starts at the top — so without this a rebuild threw the reader back to the first line,
-    // whichever way they were scrolling.
-    const scrolled = typing ? typing.scrollTop : 0;
     root.textContent = '';
-    root.dataset.clfBusy = menuBusy || objectiveBusy ? '1' : '0';
-
+    root.dataset.clfBusy = menuBusy ? '1' : '0';
     for (const row of view.rows) {
       const line = document.createElement('button');
       line.type = 'button';
@@ -7470,7 +6670,6 @@
       line.setAttribute('role', 'switch');
       line.setAttribute('aria-checked', row.on ? 'true' : 'false');
       line.disabled = menuBusy || row.disabled === true;
-
       const label = document.createElement('span');
       label.className = 'clf-menu-label';
       const name = document.createElement('span');
@@ -7479,39 +6678,13 @@
       const note = document.createElement('span');
       note.className = 'clf-menu-note';
       note.textContent = row.note;
-      if (row.warn) note.dataset.clfWarn = '1';
       label.append(name, note);
-
       const track = buildSwitch();
       track.dataset.clfOn = row.on ? '1' : '0';
       line.append(label, track);
-      if (!row.disabled) {
-        line.addEventListener('click', (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          void setSetting(row.key, !row.on);
-        });
-      }
+      if (!row.disabled) line.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); void setSetting(row.key, !row.on); });
       root.append(line);
     }
-    // Under the switch, and above the task it points at.
-    if (view.mode) root.append(buildMode(view.mode));
-    if (goalConfig?.proLoopDelivery && composerChat().state === 'chat') {
-      const delivery = document.createElement('button');
-      delivery.type = 'button'; delivery.className = 'clf-menu-action';
-      delivery.textContent = `${goalConfig.mode === 'loop' ? 'Loop' : 'Goal'}: ${goalConfig.afterTurn ? 'After this turn + finish' : 'Only finish'}`;
-      delivery.disabled = menuBusy || !!goalConfig.blocked;
-      delivery.addEventListener('click', event => {
-        event.preventDefault(); event.stopPropagation();
-        void setSetting('loopAfterTurn', !goalConfig.afterTurn);
-      });
-      root.append(delivery);
-    }
-    // Under the slider rather than between the modes: the task text is what either mode is
-    // pointed at. Outside the loop, because above a New Chat there is no slider to hang it
-    // off and it is then the only thing in the sheet that can start anything.
-    root.append(buildObjective(view.objective));
-
     const act = document.createElement('button');
     act.type = 'button';
     act.className = 'clf-menu-action';
@@ -7519,250 +6692,14 @@
     act.disabled = view.action.action === 'none' || menuBusy;
     if (view.action.hint) act.setAttribute('data-clf-tip', view.action.hint);
     act.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      closeMenu();
+      event.preventDefault(); event.stopPropagation(); closeMenu();
       if (view.action.action === 'start') void startCompact();
       else if (view.action.action === 'cancel') void cancelCompact();
     });
     root.append(act);
-
     root.hidden = false;
     control.button.setAttribute('aria-expanded', 'true');
     placeMenu(root, control.button);
-    const box = root.querySelector('[data-clf-goal-input]');
-    if (box) {
-      if (caret) {
-        box.focus();
-        try {
-          box.setSelectionRange(caret.start, caret.end);
-        } catch {
-          // A browser that will not take a selection on a freshly attached node keeps the
-          // focus, which is the half that matters.
-        }
-      }
-      // After the selection, never before it: restoring a caret scrolls it into view, so the
-      // position taken above has to be the last word on where this box is looking.
-      if (scrolled > 0) box.scrollTop = scrolled;
-    }
-  }
-
-  /**
-   * Off | Goal | Loop, as one handle with three stops.
-   *
-   * The three stops are drawn at a fixed width and the line under them is one line, always, so
-   * that moving the handle changes what the sheet says and never how big it is. A sheet that
-   * grew a row taller as somebody chose Loop moved everything under the cursor while they were
-   * still looking at it.
-   *
-   * `aria-checked` rather than a `<select>` because this is what it looks like: three positions,
-   * one of them true, all three readable without opening anything.
-   */
-  function buildMode(mode) {
-    const box = document.createElement('div');
-    box.className = 'clf-menu-mode';
-    box.dataset.clfRow = 'mode';
-
-    const track = document.createElement('div');
-    track.className = 'clf-menu-mode-track';
-    track.dataset.clfValue = mode.value;
-    track.setAttribute('role', 'radiogroup');
-    track.setAttribute('aria-label', 'Goal mode');
-
-    // Behind the three labels, and the only thing that moves. Its position is the value, so
-    // there is nothing to keep in step with the buttons in front of it.
-    const fill = document.createElement('span');
-    fill.className = 'clf-menu-mode-fill';
-    fill.setAttribute('aria-hidden', 'true');
-    track.append(fill);
-
-    for (const option of mode.options) {
-      const stop = document.createElement('button');
-      stop.type = 'button';
-      stop.className = 'clf-menu-mode-option';
-      stop.dataset.clfMode = option.value;
-      stop.setAttribute('role', 'radio');
-      stop.setAttribute('aria-checked', option.value === mode.value ? 'true' : 'false');
-      stop.textContent = option.label;
-      stop.disabled = menuBusy || mode.disabled === true;
-      if (option.hint) stop.setAttribute('data-clf-tip', option.hint);
-      if (!mode.disabled) {
-        stop.addEventListener('click', (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          void setMode(option.value, mode.value);
-        });
-      }
-      track.append(stop);
-    }
-    box.append(track);
-
-    const note = document.createElement('span');
-    note.className = 'clf-menu-mode-note';
-    note.textContent = mode.note;
-    if (mode.warn) note.dataset.clfWarn = '1';
-    box.append(note);
-    return box;
-  }
-
-  /**
-   * The specific goal, and the mode it is written in.
-   *
-   * Closed it is a link — two only above a New Chat, where the mode is still to be chosen and
-   * there is no slider to choose it on. Open it is a box, a Save that names the mode it is
-   * about to save in, a Cancel, and a Clear once there is something to clear.
-   */
-  function buildObjective(objective) {
-    const box = document.createElement('div');
-    box.className = 'clf-menu-goal';
-    box.dataset.clfGoalOpen = objective.editing ? '1' : '0';
-
-    if (!objective.available) {
-      const why = document.createElement('span');
-      why.className = 'clf-menu-goal-note';
-      why.textContent = objective.unavailable;
-      box.append(why);
-      return box;
-    }
-
-    if (!objective.editing) {
-      if (objective.summary) {
-        const text = document.createElement('span');
-        text.className = 'clf-menu-goal-text';
-        text.textContent = objective.summary;
-        box.append(text);
-      }
-      // The failure belongs to the sheet, not to one of the two links: a save that was
-      // refused was made in one mode and would read as that mode's own problem.
-      if (objectiveError) {
-        const failure = document.createElement('span');
-        failure.className = 'clf-menu-goal-note';
-        failure.dataset.clfWarn = '1';
-        failure.textContent = objectiveError;
-        box.append(failure);
-      }
-      // One row, because the two are alternatives rather than a list: stacked, the second one
-      // reads as a further setting under the first instead of the other half of one choice.
-      const links = document.createElement('div');
-      links.className = 'clf-menu-goal-links';
-      for (const action of objective.actions) {
-        const link = document.createElement('button');
-        link.type = 'button';
-        link.className = 'clf-menu-goal-link';
-        link.dataset.clfGoalMode = action.mode;
-        // Off offers no editor, and says why in the tooltip rather than by disappearing: a
-        // control that vanishes reads as a bug, and this one comes back on the next stop.
-        link.disabled = objectiveBusy || menuBusy || action.disabled === true;
-        // The reason hangs on the row, not on the button, whenever the button is the thing
-        // that is off. A disabled control receives no pointer events at all, so a tooltip
-        // put on it is a tooltip nobody can read — and this one is the whole explanation of
-        // why the task cannot be opened here.
-        if (action.disabled === true) links.setAttribute('data-clf-tip', action.hint);
-        else link.setAttribute('data-clf-tip', action.hint);
-        const plus = document.createElement('span');
-        plus.className = 'clf-menu-goal-plus';
-        plus.textContent = objective.summary ? '✎' : '+';
-        plus.setAttribute('aria-hidden', 'true');
-        const word = document.createElement('span');
-        word.textContent = objectiveBusy ? 'working…' : action.label;
-        link.append(word, plus);
-        link.addEventListener('click', (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          openObjectiveEditor(objective.text, action.mode);
-        });
-        links.append(link);
-      }
-      box.append(links);
-      return box;
-    }
-
-    const input = document.createElement('textarea');
-    input.className = 'clf-menu-goal-input';
-    input.dir = 'auto';
-    input.dataset.clfGoalInput = '1';
-    input.rows = 3;
-    input.placeholder = 'What does this chat have to reach?';
-    input.value = menuDraft;
-    input.disabled = objectiveBusy;
-    input.addEventListener('keydown', (event) => {
-      // Enter sends, exactly as it does in the composer this sheet sits above. A goal that
-      // genuinely needs paragraphs still has shift+enter.
-      if (event.key === 'Enter' && !event.shiftKey) {
-        event.preventDefault();
-        // Same gate as the Save button, because this is the same act: a keystroke must not be
-        // the one way past an Off.
-        if (objective.savable === false) return;
-        void saveObjective(input.value, objective.mode);
-      }
-    });
-    box.append(input);
-
-    const buttons = document.createElement('div');
-    buttons.className = 'clf-menu-goal-buttons';
-    const save = document.createElement('button');
-    save.type = 'button';
-    save.className = 'clf-menu-goal-save';
-    save.dataset.clfGoalMode = objective.mode;
-    // Named, not just "Save". This button is the moment the mode is decided, and the two
-    // outcomes are a run that may stop and a run that may not.
-    save.textContent = objectiveBusy ? 'Saving…' : objective.mode === 'loop' ? 'Save as loop' : 'Save as goal';
-    save.disabled = objectiveBusy || !menuDraft.trim() || objective.savable === false;
-    save.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void saveObjective(menuDraft, objective.mode);
-    });
-    const cancel = document.createElement('button');
-    cancel.type = 'button';
-    cancel.className = 'clf-menu-goal-cancel';
-    cancel.textContent = 'Cancel';
-    cancel.disabled = objectiveBusy;
-    cancel.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      closeObjectiveEditor();
-    });
-    // Typing does not repaint the sheet — it would take the caret with it — so the one thing
-    // in it that depends on what has been typed is kept in step by hand.
-    input.addEventListener('input', () => {
-      menuDraft = input.value;
-      save.disabled = objectiveBusy || !menuDraft.trim() || objective.savable === false;
-    });
-    // On the row rather than on Save, for the same reason as the link above: the button this
-    // explains is disabled, and a disabled button is deaf to the pointer.
-    if (objective.savable === false) {
-      buttons.setAttribute('data-clf-tip', 'Pick Goal or Loop above first — Off writes nothing.');
-    }
-    buttons.append(save, cancel);
-    if (objective.text) {
-      const clear = document.createElement('button');
-      clear.type = 'button';
-      clear.className = 'clf-menu-goal-clear';
-      clear.textContent = 'Clear';
-      // Deleting the task is an edit like any other, so Off stops it too. Reachable only from
-      // an editor that was already open when the handle moved — and letting it through there
-      // would delete the sentence from under a slider that says nothing is written here.
-      clear.disabled = objectiveBusy || objective.savable === false;
-      clear.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        // The mode goes with the clear as well. Writing the goal switched this chat's mode
-        // on; deleting it has to switch that same mode back off, or the chat keeps being
-        // prompted with no finish line left anywhere to describe what for.
-        void saveObjective('', objective.driving);
-      });
-      buttons.append(clear);
-    }
-    box.append(buttons);
-    if (objectiveError) {
-      const failure = document.createElement('span');
-      failure.className = 'clf-menu-goal-note';
-      failure.dataset.clfWarn = '1';
-      failure.textContent = objectiveError;
-      box.append(failure);
-    }
-    return box;
   }
 
   /** Above the gear and right-aligned to it, flipped below only when there is no room. */
@@ -7792,14 +6729,10 @@
     };
     const keydown = (event) => {
       if (!menuOpen || event.key !== 'Escape') return;
-      // One Escape at a time: the goal box first, the sheet after. Losing a half-written
-      // goal because the sheet went with it is the mistake worth not making.
-      if (menuEditing) closeObjectiveEditor();
-      else closeMenu();
+      closeMenu();
     };
     const scroll = (event) => {
-      // Scrolling a long goal back into view inside the sheet is not "I am doing something
-      // else now" — it is using the sheet. Only the page moving underneath closes it.
+      // Scrolling inside the sheet is using the sheet; only the page moving underneath closes it.
       const at = event.target;
       if (at && at.nodeType === 1 && at.closest && at.closest('[data-clf-menu]')) return;
       closeMenu();
@@ -7818,11 +6751,7 @@
     control.root.hidden = state.mode === 'hidden';
     control.root.dataset.clfMode = state.mode;
     // Only over the chat it is about: an id-less New Chat route inherits nothing.
-    control.blocked.hidden = !(
-      composerChat().state === 'chat' &&
-      goalConfig &&
-      goalConfig.blocked === 'blocked'
-    );
+    control.blocked.hidden = !(composerChat().state === 'chat' && blockReason === 'blocked');
     // Never disabled any more: it opens a sheet, and a sheet that explains why compaction is
     // unavailable is exactly what somebody clicking a dead button wanted to be told.
     control.button.disabled = false;
@@ -7976,165 +6905,31 @@
   }
 
   function stageView(input) {
-    const { job, goal, phase = nativePhase, summary } = input;
+    const { job, phase = nativePhase, summary } = input;
     if (job && job.busy) {
-      const stage =
-        job.stage === 'opening'
-          ? 'Opening a fresh chat'
-          : job.stage === 'waiting-for-browser'
-            ? 'Waiting for Chrome'
-            : phase === 'delivering' ? 'Saving the handoff'
-              : summary?.state === 'stopped' ? 'The handoff response was stopped'
-                : summary?.state === 'failed' ? 'The handoff response needs attention'
-                  : summary?.state === 'writing' ? 'ChatGPT is writing the handoff' : 'Waiting for the handoff response';
-      // The prompt's durable position, not this document's memory of typing it. A reload
-      // during the compaction turn starts a page whose `phase` is empty while the marked
-      // prompt has been with ChatGPT for minutes — and the bar then said "Preparing" about
-      // work that was two steps further on, for as long as the answer took. The app's
-      // checkpoint outlives the page, so the page reads its progress off that instead.
-      const asked =
-        job.sourceSend &&
-        (job.sourceSend.state === 'dispatched-unresolved' || job.sourceSend.state === 'sent');
-      const at =
-        job.stage === 'opening' || job.stage === 'waiting-for-browser'
-          ? 3
-          : phase === 'delivering'
-            ? 2
-            : phase === 'prompting' || phase === 'waiting' || asked
-              ? 1
-              : 0;
+      const stage = job.stage === 'opening' ? 'Opening a fresh chat'
+        : job.stage === 'waiting-for-browser' ? 'Waiting for Chrome'
+          : phase === 'delivering' ? 'Saving the handoff'
+            : summary?.state === 'stopped' ? 'The handoff response was stopped'
+              : summary?.state === 'failed' ? 'The handoff response needs attention'
+                : summary?.state === 'writing' ? 'ChatGPT is writing the handoff' : 'Waiting for the handoff response';
+      const asked = job.sourceSend && (job.sourceSend.state === 'dispatched-unresolved' || job.sourceSend.state === 'sent');
+      const at = job.stage === 'opening' || job.stage === 'waiting-for-browser' ? 3
+        : phase === 'delivering' ? 2 : phase === 'prompting' || phase === 'waiting' || asked ? 1 : 0;
       return { stage, detail: summary?.detail || '', body: '', kind: 'compact', steps: COMPACT_STEPS, at, done: false };
     }
-    const goalView = goalStageView(goal);
-    if (goalView) return goalView;
     const now = input.now ?? Date.now();
-    // A real assistant change immediately wins over a wait caption. Generation alone
-    // does not prove which remote dependency is pending, so never invent one.
     if (now - (input.changedAt ?? now) < 3000) return null;
     const progress = input.progress;
     const frame = (stage, detail = '') => ({ stage, detail, body: '', kind: 'wait' });
     if (progress?.tools?.count > 0 && now - progress.tools.since >= 3000)
       return frame(progress.tools.count === 1 ? 'Waiting for a local tool to finish' : `Waiting for ${progress.tools.count} local tools to finish`);
     const workers = progress?.workers;
-    // Failed workers remain in history and the agent panel. Only live workers
-    // explain this wait; a historical failure must not pin it across handoffs.
     if (workers?.active > 0) {
-      const summary = `${workers.finished} finished · ${workers.active} running${workers.failed ? ` · ${workers.failed} failed` : ''}`;
-      // Running siblings are not proof that the prime is blocked on them.
-      return frame(workers.active === 1 ? `Worker still running: ${workers.names?.[0] || 'Worker'}`
-        : `${workers.active} workers still running`, summary);
+      const detail = `${workers.finished} finished ? ${workers.active} running${workers.failed ? ` ? ${workers.failed} failed` : ''}`;
+      return frame(workers.active === 1 ? `Worker still running: ${workers.names?.[0] || 'Worker'}` : `${workers.active} workers still running`, detail);
     }
     return input.generating ? frame('Still waiting for the current operation to complete') : null;
-  }
-
-  /**
-   * The short name of a model id, for a caption a person reads at a glance.
-   *
-   * `deepseek/deepseek-v4-flash` is the id the API wants and not what anybody calls it. The
-   * vendor prefix and the `:free`/`:nitro` variant suffix are both routing detail. A custom
-   * endpoint id without a slash passes through untouched.
-   */
-  function modelLabel(id) {
-    const name = String(id || '').trim();
-    if (!name) return 'the model';
-    const tail = name.slice(name.lastIndexOf('/') + 1);
-    return tail.split(':')[0] || tail;
-  }
-
-  /**
-   * The goal loop's half of the panel.
-   *
-   * Split out because it is the half with states in it, and because it is the half worth
-   * testing on its own. The rule throughout: say what is happening in the words of the thing
-   * that is happening, and show the message itself as it arrives — a loop that types into
-   * somebody's chat unattended should never have a step nobody can see.
-   *
-   * `phase` is what this tab is doing and `draft.stage` is what the app is doing, and they
-   * describe different halves of the same run, so the tab's own terminal states are read
-   * first and the app's streaming states after.
-   */
-  /**
-   * The stages of one goal run, in the order they happen, as the bar names them.
-   *
-   * Four, because four different things can be the one taking the time — ChatGPT finishing
-   * its answer, the request opening, the model writing, the message going into the composer
-   * — and a caption on its own only ever answered "what now". It never answered "how far",
-   * so a run that had stopped and a run that was merely slow looked identical for minutes.
-   */
-  const GOAL_STEPS = ['Answer settling', 'Reading the chat', 'Writing the reply', 'Sending'];
-
-  /**
-   * Which of those a phase is.
-   *
-   * A run that stops is drawn where it stopped, which means the phase has to survive the
-   * failure — so the failing paths keep their own phase and record the reason beside it
-   * rather than collapsing everything into one `failed`. `failed` itself is the older shape
-   * and still means the request, so a stale state does not draw a bar with nothing lit.
-   */
-  const GOAL_STEP_AT = { settling: 0, requesting: 1, drafting: 2, retrying: 2, sending: 3, failed: 1 };
-
-  function goalStageView(goal) {
-    if (!goal) return null;
-    const draft = goal.draft || null;
-    const who = modelLabel(draft?.model || goal.model);
-    const backend = draft?.backend || goal.backend;
-    const dest = backend === 'chatgpt' ? 'ChatGPT helper' : backend === 'templates' ? 'offline templates'
-      : goal.provider === 'custom' ? 'custom endpoint' : 'OpenRouter';
-    const bar = (at, done = false) => ({ steps: GOAL_STEPS, at, done });
-    const failure = goal.error || (draft && draft.stage === 'failed' ? draft.message || draft.error || `${dest} did not answer` : '');
-    if (failure) {
-      const at = draft && draft.stage === 'failed' ? 2 : (GOAL_STEP_AT[goal.phase] ?? 1);
-      if (goal.phase === 'retrying') {
-        const seconds = Math.round((goal.retryMs || GOAL_RETRY_MS) / 1000);
-        return { stage: `Retrying Goal in ${seconds} seconds`, detail: failure, body: '', kind: 'goal', ...bar(at) };
-      }
-      return { stage: goal.mode === 'loop' ? 'Loop continuation paused' : 'The goal loop stopped', detail: failure, body: '', kind: 'goal-error', ...bar(at) };
-    }
-    // A chat opening on a specific goal. There is no answer to read and no turn to settle,
-    // so the first two steps of the ordinary run simply did not happen; saying "sending the
-    // answer to OpenRouter" about a chat with no answer in it yet would be describing a
-    // different run entirely.
-    if (goal.opening) {
-      if (goal.phase === 'sending') return { stage: 'Sending it to ChatGPT', detail: '', body: '', kind: 'goal', ...bar(3) };
-      return { stage: `${who} is writing the first message`, detail: '', body: '', kind: 'goal', ...bar(2) };
-    }
-    if (goal.phase === 'done') {
-      // The loop's own success condition, and the one state worth spelling out: nothing was
-      // typed, and that is the answer rather than a failure to produce one. The bar stops at
-      // the reply for the same reason — there was never anything to send.
-      return { stage: 'Goal reached', detail: 'nothing was sent', body: '', kind: 'goal-done', ...bar(2, true) };
-    }
-    if (goal.phase === 'settling' || (!draft && goal.wait)) {
-      const wait = goal.wait;
-      const seconds = wait?.until ? Math.max(0, Math.ceil((wait.until - Date.now()) / 1000)) : 0;
-      const detail = seconds ? `Checking again in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : '';
-      const stage = wait?.reason === 'native-busy' ? 'ChatGPT resumed work · waiting before retry' : wait?.reason === 'silence' ? 'Waiting before recovery reload' : wait?.reason === 'quiet' ? 'Waiting for tool inactivity' :
-        wait?.reason === 'tools' ? 'Waiting for running tools' : wait?.reason === 'listening' ? 'Waiting for activity after recovery' : 'Checking the answer is finished';
-      return { stage, detail, body: '', kind: 'goal', ...bar(0) };
-    }
-    if (goal.phase === 'sending' && draft && draft.reply) {
-      return { stage: 'Sending it to ChatGPT', detail: '', body: draft.reply, kind: 'goal', ...bar(3) };
-    }
-    if (goal.phase === 'requesting' && !draft) {
-      return { stage: `Sending the answer to ${dest}`, detail: who, body: '', kind: 'goal', ...bar(1) };
-    }
-    if (!draft) return null;
-    if (draft.stage === 'no-reply') {
-      return { stage: 'Goal reached', detail: 'nothing was sent', body: '', kind: 'goal-done', ...bar(2, true) };
-    }
-    if (draft.stage === 'sending') {
-      return { stage: `Sending the answer to ${dest}`, detail: who, body: '', kind: 'goal', ...bar(1) };
-    }
-    if (draft.stage === 'answering') {
-      // Streamed, so the wait has something in it. The text is the message being written for
-      // the user, which is exactly the thing worth reading before it is sent.
-      return { stage: `${who} is answering`, detail: '', body: draft.text || '', kind: 'goal', ...bar(2) };
-    }
-    if (draft.stage === 'ready') {
-      // Written, not yet typed: the third segment is full and the fourth has not started.
-      return { stage: `${who} wrote the next message`, detail: '', body: draft.reply || '', kind: 'goal', ...bar(2, true) };
-    }
-    return null;
   }
 
   let stagePanel = null;
@@ -8146,75 +6941,29 @@
     stagePanel = null;
   }
 
-  /** Only terminal Goal cards linger long enough to need dismissal. */
-  function goalStageDismissKey(view) {
-    if (!view || (view.kind !== 'goal-done' && view.kind !== 'goal-error')) return '';
-    return `${conversationId || 'unknown'}:${goalTurnId || 'terminal'}`;
-  }
-
-  /** Dismisses only a finished/stopped Goal run; active work is never hidden implicitly. */
-  function dismissTerminalGoalStage() {
-    const view = stageView({
-      job,
-      phase: nativePhase,
-      goal: goalConfig
-        ? {
-            ...goalConfig,
-            phase: goalPhase,
-            error: goalError,
-            retryMs: goalRetryWaitMs,
-            draft: goalDraft,
-            opening: composerChat().state === 'new' && Boolean(pendingObjective)
-          }
-        : null
-    });
-    const key = goalStageDismissKey(view);
-    if (!key) return;
-    dismissedGoalStage = key;
-    removeStagePanel();
-  }
-
   function buildStage() {
     const root = document.createElement('div');
     root.className = 'clf-stage';
     root.dataset.clfStage = '1';
     root.setAttribute('role', 'status');
     root.setAttribute('aria-live', 'polite');
-
     const head = document.createElement('div');
     head.className = 'clf-stage-head';
     const title = document.createElement('span');
     title.className = 'clf-stage-title';
     const detail = document.createElement('span');
     detail.className = 'clf-stage-detail';
-    const close = document.createElement('button');
-    close.className = 'clf-stage-close';
-    close.type = 'button';
-    close.textContent = '×';
-    close.title = 'Dismiss';
-    close.setAttribute('aria-label', 'Dismiss Goal status');
-    close.hidden = true;
-    close.addEventListener('click', () => {
-      // Removing the node alone is not enough: injectStage runs on every activity repaint
-      // and would immediately put the same terminal card back. Remember this exact Goal turn;
-      // the next turn has a different key and is shown normally.
-      if (!stagePanel || stagePanel.root !== root || !stagePanel.dismissKey) return;
-      dismissedGoalStage = stagePanel.dismissKey;
-      removeStagePanel();
-    });
-    head.append(title, detail, close);
-
+    head.append(title, detail);
     const steps = document.createElement('div');
     steps.className = 'clf-stage-steps';
-
     const body = document.createElement('div');
     body.className = 'clf-stage-body';
-
     root.append(head, steps, body);
-    return { root, title, detail, close, steps, body, dismissKey: '' };
+    return { root, title, detail, steps, body };
   }
 
   /**
+   * The bar under the caption  /**
    * The bar under the caption: one named segment per stage, filled up to where the run is.
    *
    * Built once per set of names and then only re-stamped, because this repaints on every
@@ -8251,15 +7000,12 @@
       }
     }
     const at = Number.isFinite(view.at) ? view.at : 0;
-    const stopped = view.kind === 'goal-error';
     [...host.children].forEach((step, index) => {
       const state =
         index < at || (index === at && view.done === true)
           ? 'done'
           : index === at
-            ? stopped
-              ? 'stopped'
-              : 'now'
+            ? 'now'
             : 'next';
       if (step.dataset.clfStep !== state) step.dataset.clfStep = state;
     });
@@ -8270,9 +7016,7 @@
    *
    * The route is the authority here, not the id this tab is still holding. Clicking New Chat
    * leaves that id in place on purpose — an id-less route is also ordinary React churn, and
-   * dropping the conversation on it was its own bug — but a goal written into the composer
-   * that follows belongs to the chat about to be created, not to the one before it. The third
-   * state is the honest one: the route names a chat this tab has not observed yet, and
+   * dropping the conversation on it was its own bug. The third state is the honest one: the route names a chat this tab has not observed yet, and
    * neither id is safe to write a message into.
    */
   function composerChat() {
@@ -8287,67 +7031,35 @@
    * control beside it: ChatGPT replaces this subtree whenever it feels like it.
    */
   function injectStage() {
-    // Stage state is conversation-scoped. A concrete different route is handled by
-    // resetConversation(); an id-less route is the New Chat/transient-router gap. In both
-    // cases the current composer is not proven to belong to the state we would paint.
-    // A chat opening on a specific goal is the one id-less case worth painting: its opening
-    // message is being written right now, and there is no conversation to key it to because
-    // sending that message is what creates one.
-    const opening = composerChat().state === 'new' && Boolean(pendingObjective);
-    if (!opening && (!conversationId || CLF_DOM.conversationId() !== conversationId)) {
+    if (!conversationId || CLF_DOM.conversationId() !== conversationId) {
       removeStagePanel();
       return;
     }
     const view = stageView({
       job, progress: operationProgress, changedAt: lastChangeAt,
       summary: compactionSummaryProgress(),
-      generating: generating && CLF_DOM.generating(),
-      goal: goalConfig
-        ? { ...goalConfig, phase: goalPhase, error: goalError, retryMs: goalRetryWaitMs, draft: goalDraft, opening }
-        : null
+      generating: generating && CLF_DOM.generating()
     });
-    if (!view) {
-      removeStagePanel();
-      return;
-    }
-    const dismissKey = goalStageDismissKey(view);
-    if (dismissKey && dismissedGoalStage === dismissKey) {
-      removeStagePanel();
-      return;
-    }
+    if (!view) { removeStagePanel(); return; }
     const spot = CLF_DOM.composerStack();
     if (!spot || !spot.host) return;
     if (!stagePanel) stagePanel = buildStage();
     if (stagePanel.root.parentElement !== spot.host) {
-      for (const old of spot.host.querySelectorAll('[data-clf-stage]')) {
-        if (old !== stagePanel.root) old.remove();
-      }
+      for (const old of spot.host.querySelectorAll('[data-clf-stage]')) if (old !== stagePanel.root) old.remove();
       if (spot.before && spot.before.parentElement === spot.host) spot.host.insertBefore(stagePanel.root, spot.before);
       else spot.host.append(stagePanel.root);
     }
-
-    // The panel is meant to read as a second composer standing behind the real one, which
-    // only works if it is exactly as wide. Measured rather than assumed: ChatGPT's composer
-    // width follows the window and the sidebar, and the parent centres its children instead
-    // of stretching them, so a fixed `max-width` left this sized to its own caption.
     const box = spot.before && spot.before.getBoundingClientRect ? spot.before.getBoundingClientRect() : null;
     const width = box && box.width > 0 ? `${Math.round(box.width)}px` : '';
     if (width && stagePanel.root.style.width !== width) {
       stagePanel.root.style.width = width;
       stagePanel.root.style.maxWidth = 'none';
     }
-
     if (stagePanel.title.textContent !== view.stage) stagePanel.title.textContent = view.stage;
     if (stagePanel.detail.textContent !== view.detail) stagePanel.detail.textContent = view.detail;
-    stagePanel.dismissKey = dismissKey;
-    stagePanel.close.hidden = dismissKey === '';
     stagePanel.root.dataset.clfStageKind = view.kind;
     paintStageSteps(stagePanel.steps, view);
     if (stagePanel.body.textContent !== view.body) {
-      // Measured before the text is replaced, not after: afterwards `scrollHeight` is
-      // already the new content's, so the test would answer a question about the old
-      // scroll position using the new document and follow even when the reader had
-      // scrolled up to read something.
       const atEnd = stagePanel.body.scrollHeight - stagePanel.body.scrollTop - stagePanel.body.clientHeight < 40;
       stagePanel.body.textContent = view.body;
       if (atEnd) stagePanel.body.scrollTop = stagePanel.body.scrollHeight;
@@ -8379,7 +7091,8 @@
     const workerCompactionBlocked = () =>
       Boolean(agent) ||
       bootstrap === 'worker' ||
-      Boolean(goalConfig && (goalConfig.blocked === 'worker' || goalConfig.blocked === 'blocked'));
+      blockReason === 'worker' ||
+      blockReason === 'blocked';
     // A worker's conversation is its agent identity. Usually /activity has already projected
     // blocked:'worker', and the original worker document also knows `agent` immediately after its
     // bootstrap. A reloaded worker has a smaller race: checkStatus() can render the composer gear
@@ -8419,13 +7132,10 @@
       renderControl();
       return;
     }
-    if (
-      (policyData.goal && (policyData.goal.blocked === 'worker' || policyData.goal.blocked === 'blocked')) ||
-      policyData.bootstrap === 'worker'
-    ) {
+    if (policyData.blocked === 'worker' || policyData.blocked === 'blocked' || policyData.bootstrap === 'worker') {
       // Adopt just the role-bearing projection so the already-open menu/control becomes truthful
       // immediately. The normal activity loop will consume stream/cursor data on its own poll.
-      if (policyData.goal && typeof policyData.goal === 'object') goalConfig = policyData.goal;
+      blockReason = typeof policyData.blocked === 'string' ? policyData.blocked : blockReason;
       if (policyData.context) context = readContext(policyData.context) || context;
       bootstrap = policyData.bootstrap === 'worker' ? 'worker' : bootstrap;
       pressedAt = 0;
@@ -8942,7 +7652,6 @@
       }
       if (reply.data?.committed !== true) return false;
       if (typeof reply.data.commandId === 'string') {
-        rememberResumeGoalPending(conversationId, reply.data.commandId);
       }
       releaseContinuationJournal();
       return 'committed';
@@ -9039,625 +7748,6 @@
     const latest = turns.length > 0 ? finalAnswerText(turns[turns.length - 1]) : '';
     if (known && latest.length > known.length && latest.startsWith(known)) return latest;
     return held.length >= known.length ? held : known;
-  }
-
-  /**
-   * One reading of everything about this turn that moves while ChatGPT is still working.
-   *
-   * Prose is not the only thing a turn produces, and during the phase that caused all of this
-   * it is the one thing that does *not* move: the model had written 28 characters and spent
-   * the next seven minutes making tool calls. Watching the text alone would have found it
-   * perfectly stable and handed over those 28 characters, so the tool rail is read too — how
-   * many blocks the turn has, and how much each of them currently renders. A call starting, a
-   * result streaming in, a block finishing: each of them changes this string.
-   *
-   * Read from the live transcript as well as from `ended`, because a remount detaches the
-   * snapshot's nodes and a detached node stops changing for the least interesting reason.
-   */
-  function briefActivityMark(ended) {
-    const turns = CLF_DOM.turns();
-    const live = turns.length > 0 ? turns[turns.length - 1] : null;
-    const seen = [];
-    for (const turn of live && (!ended || live.node !== ended.node) ? [ended, live] : [ended]) {
-      if (!turn) continue;
-      const blocks = CLF_DOM.toolBlocks(turn);
-      seen.push(blocks.length);
-      for (const block of blocks) seen.push((block.textContent || '').length);
-    }
-    return seen.join(',');
-  }
-
-  // ---------------------------------------------------------------- goal loop
-
-  /**
-   * How long everything about a finished turn has to stay still before the goal loop
-   * believes it.
-   *
-   * The same four-signal settling rule the page uses elsewhere. A goal reply that fires early
-   * hands over half a brief, and a goal reply that fires early types "what about the tests"
-   * into a chat that is still in the middle of writing them, which the model then answers as
-   * if it were a correction. A turn that really did finish pays this once.
-   *
-   * Eight seconds is small beside the provider request it precedes, but long enough to reject
-   * the page's short Stop-button flickers.
-   */
-  const GOAL_STABLE_MS = 8_000;
-  /** How often the settling turn is re-read. */
-  const GOAL_POLL_MS = 1_000;
-  /** The ceiling on watching one turn settle before giving up on it quietly. */
-  const GOAL_WATCH_MS = 5 * 60_000;
-  /** How long a ready draft waits for a composer it cannot write into. */
-  const GOAL_TYPING_WINDOW_MS = 2 * 60_000;
-  /**
-   * How long the loop waits before asking again about a turn whose draft failed.
-   *
-   * Long enough that a provider outage costs one small request every quarter minute rather
-   * than a storm, short enough that a passing error is not felt. There is deliberately no
-   * attempt limit: the loop is finished when the model answers, and until then the only
-   * things that end it are the ones that end it anyway — Goal switched off, the user typing,
-   * a new generation, this chat left behind.
-   */
-  const GOAL_RETRY_MS = 15_000;
-  const GOAL_RETRY_CAP_MS = 4 * 60_000;
-  const goalRetryWait = () => Math.min(GOAL_RETRY_CAP_MS, GOAL_RETRY_MS * 2 ** goalRetries);
-
-  /** The turn endings worth writing a next message about. See noteGoalTurn for the rest. */
-  // Goal answers a finished, non-partial reply and nothing else: `completed` carries Fiber's
-  // `end_turn` bit, `stopped` is the user's own decision, and interrupted/failed/stalled/unknown
-  // are turns with no final answer to continue from — those belong to recovery, not to Goal.
-  const GOAL_CONTINUABLE = new Set(['completed']);
-
-  /**
-   * Browser-local terminal identity only. A pending compaction delays Goal pickup; it does
-   * not change an ordinary final into a handoff answer. Only the exact marked answer has
-   * that role. Keep config/key and mutable busy flags out of this durable reply evidence.
-   */
-  function goalTerminalCandidate(outcome, localTurnId, handoffAnswer) {
-    return Boolean(
-      !desktopDecisionChat() &&
-        localTurnId &&
-        GOAL_CONTINUABLE.has(outcome) &&
-        !handoffAnswer &&
-        bootstrap !== 'worker'
-    );
-  }
-
-  /** The goal this chat is being driven towards, '' when it has none. */
-  function currentObjective() {
-    return goalConfig && typeof goalConfig.objective === 'string' ? goalConfig.objective : '';
-  }
-
-  /** Whether the goal loop could act in this chat at all, before any turn is considered. */
-  function goalUsable() {
-    return Boolean(
-      !desktopDecisionChat() &&
-        conversationId &&
-        goalConfig &&
-        // Either the standing switch, or this chat's own goal — unless this chat has moved its
-        // own switch, in which case that switch is the whole answer and Off means off. The app
-        // applies the same rule to the request itself (goalArmedFor), and reports no goal at
-        // all for a chat the loop may not drive.
-        (goalConfig.enabled === true || (goalConfig.own !== true && currentObjective() !== '')) &&
-        goalConfig.hasKey === true &&
-        // A worker chat is already being driven — by the prime agent, through the agents
-        // tool. A second author typing into it is two conversations in one composer.
-        bootstrap !== 'worker' &&
-        // A chat the user blocked in the app has its tools refused; the app already reports
-        // it off, but a poll-old projection must never draft into it either.
-        goalConfig.blocked !== 'worker' &&
-        goalConfig.blocked !== 'blocked'
-    );
-  }
-
-  /**
-   * A turn just ended. Decide whether the goal loop wants to answer it.
-   *
-   * Called from finishGeneration with that generation's own section and outcome, which is the
-   * only place both are still known. Everything refused here is refused for a reason that
-   * does not change a second later, so nothing retries.
-   */
-  function noteGoalTurn(ended, outcome, endedTurnId) {
-    // The accepted helper user receipt and current provider terminal own its result.
-    // A renderer lifecycle edge must not create a second, captured-node owner.
-    if (desktopDecision && desktopDecision.onTarget()) return;
-    if (!endedTurnId || !goalUsable() || goalConfig?.queuePending) return;
-    // Only a finished, non-partial answer. See GOAL_CONTINUABLE for why every other outcome —
-    // including `interrupted` — belongs to recovery rather than to this loop.
-    if (!GOAL_CONTINUABLE.has(outcome)) return;
-    // A compaction owns this turn: its answer is the brief, not a message to reply to, and
-    // the chat is about to be replaced anyway.
-    if (nativeBusy || (job && job.busy)) return;
-    // One draft per generation, and this is the near half of that rule; the app holds the
-    // other half against a retried request. See /goal/draft.
-    if (goalTurnId === endedTurnId) return;
-    if (goalBusy) return;
-    goalTurnId = endedTurnId;
-    goalRetries = 0;
-    setGoalPhase('');
-    // Goal is now authoritative for this exact completed turn. Raising the sender tab is a
-    // courtesy after that decision, never an input to it: hidden tabs take this same path and a
-    // failed focus request must not stop the draft. Claim goalTurnId first so the visibility
-    // change caused by focusing cannot re-enter this turn and request/focus it twice.
-    void ask({ type: 'focus_tab', conversationId }).catch(() => undefined);
-    void watchGoalTurn(ended, endedTurnId);
-  }
-
-  /**
-   * Recovers exactly one resume-caused answer that the recorder never saw while it was live.
-   *
-   * Chrome may suspend/throttle a hidden replacement tab long enough for React to mount Stop,
-   * render the whole first answer and remove Stop before this isolated world runs another
-   * observation. There is then no local `turn_start`, so the ordinary `finishGeneration()` →
-   * `noteGoalTurn()` edge can never happen. The resume command itself is the missing provenance:
-   * this document sent the only user message in a fresh chat, and the app ACKed the continuation
-   * into that exact conversation. That lets us recover this one new answer without ever treating
-   * an arbitrary historical answer as fresh work.
-   *
-   * Goal policy is evaluated only after `/activity` has returned B's post-commit config. If Goal
-   * was not usable at that boundary, consume the hint just like an ordinarily observed turn
-   * would have been skipped; enabling it later must not replay history.
-   */
-  function maybeRecoverResumeGoalTurn() {
-    const pending = resumeGoalPending;
-    if (!pending || !conversationId) return;
-    if (pending.conversationId !== conversationId) {
-      // A concrete navigation away ends the one-tab provenance. Do not carry B's first answer
-      // recovery into whichever chat happens to be opened next.
-      if (CLF_DOM.conversationId() && CLF_DOM.conversationId() !== pending.conversationId) clearResumeGoalPending();
-      return;
-    }
-    // A normally observed generation already entered Goal, or a draft restored from the app
-    // proves another page-side trigger got there first. Either way the recovery hint is spent.
-    if (goalTurnId || goalDraft) return void clearResumeGoalPending();
-    // Null means B's post-commit policy has not arrived yet. That is the exact race this helper
-    // exists to bridge, so keep the hint rather than deciding from stale/default settings.
-    if (!goalConfig) return;
-    if (!goalUsable()) return void clearResumeGoalPending();
-    if (goalBusy || generating || CLF_DOM.generating() || nativeBusy || (job && job.busy)) return;
-
-    // The resume bootstrap is the only user turn we are entitled to reason from. If somebody
-    // manually continued before recovery ran, the conversation has moved on and the old first
-    // answer must not generate another user message behind theirs.
-    const users = CLF_DOM.messages().filter(
-      (message) => message && message.role === 'user' && !retiredMessages.has(message.id) && !isStale(message.node)
-    );
-    if (users.length > 1) return void clearResumeGoalPending();
-    if (users.length !== 1) return;
-
-    const turns = CLF_DOM.turns();
-    const ended = pending.turnId
-      ? [...turns].reverse().find((candidate) => localGenerationOf(candidate) === pending.turnId) || null
-      : currentAssistantTurn(turns);
-    if (!ended || !finalAnswerText(ended).trim()) return;
-    let result = endOutcome(ended);
-    if (result.outcome === 'unknown') {
-      // For a tracked turn refreshFiber() closes directly from endMessageId. This missed turn
-      // has no local generation to close, so read the same exact terminal fact here instead.
-      const fiber = fiberTurnFor(ended);
-      if (fiber?.endMessageId && !(fiber.calls || []).some((call) => !call || call.answered !== true)) {
-        result = { outcome: 'completed' };
-      }
-    }
-    if (result.outcome === 'unknown') return;
-    if (!GOAL_CONTINUABLE.has(result.outcome)) return void clearResumeGoalPending();
-
-    // Stable across a content-script reload, and deliberately a local generation-style id rather
-    // than a website message id. The app's /goal/draft idempotency therefore sees one turn even
-    // if the activity wake/foreground event is delivered twice.
-    const recoveredTurnId = pending.turnId || `g-resume-${pending.commandId}`.slice(0, 200);
-    noteGoalTurn(ended, result.outcome, recoveredTurnId);
-    // noteGoalTurn synchronously claims goalTurnId before its first await. Persist the spent
-    // provenance immediately so a reload cannot synthesize a second id/request for this answer.
-    if (goalTurnId === recoveredTurnId) clearResumeGoalPending();
-  }
-
-  /**
-   * Reattaches Goal to the app's durable stable-reply cursor after refresh/config races.
-   *
-   * No transcript scan occurs here. The app has already accepted one exact final assistant
-   * message under the Goal policy that was live at that moment; this document only waits for
-   * ChatGPT's composer to be truly idle, then resumes that same turn id.
-   */
-  function maybeRecoverDurableGoalTurn() {
-    const pending = goalConfig && goalConfig.pending;
-    if (!pending || !pending.replyId || !pending.turnId || !conversationId) return;
-    if (!goalUsable() || goalConfig?.queuePending || goalBusy || (pending.listenUntil ?? 0) > Date.now()) return;
-    if (CLF_DOM.generating()) {
-      goalBusy = true;
-      const target = conversationId, forEpoch = epoch, revision = turnProgressRevision;
-      const safe = () => alive && epoch === forEpoch && conversationId === target && CLF_DOM.conversationId() === target &&
-        turnProgressRevision === revision && goalConfig?.pending?.replyId === pending.replyId &&
-        goalConfig?.pending?.acceptedAt === pending.acceptedAt && goalUsable() &&
-        !userStopped && pendingTools === 0 && !nativeBusy && !job?.busy &&
-        CLF_DOM.composerVisible() && !(CLF_DOM.composer()?.textContent || '').trim() && !CLF_DOM.hasComposerAttachments() &&
-        !CLF_DOM.errors().some(error => error.blocking === true);
-      void (async () => {
-        if (!safe() || !await confirmedProviderTerminal(true) || !safe()) return;
-        const permit = await ask({ type: 'goal_draft', conversationId: target, turnId: pending.turnId, nativeBusy: true });
-        if (permit?.data?.recovery?.stop !== true || !safe() || !await confirmedProviderTerminal(true) || !safe()) return;
-        await stopAutomationGeneration(safe);
-      })()
-        .catch(() => undefined)
-        .finally(() => { if (epoch === forEpoch && conversationId === target) goalBusy = false; });
-      return;
-    }
-    if (goalDraft || (generating && !goalRecoveryReady(pending)) || CLF_DOM.generating()) return;
-    if (nativeBusy || (job && job.busy)) return;
-    const acceptedAt = Number(pending.acceptedAt);
-    const ticketId = `${pending.replyId}:${Number.isFinite(acceptedAt) && acceptedAt > 0 ? acceptedAt : pending.eventSeq}`;
-    if (goalTicketId === ticketId) return;
-    goalTicketId = ticketId;
-    goalTurnId = pending.turnId;
-    goalRetries = 0;
-    setGoalPhase('');
-    const forId = conversationId;
-    const forEpoch = epoch;
-    const forTurn = pending.turnId;
-    const current = () =>
-      alive &&
-      conversationId === forId &&
-      epoch === forEpoch &&
-      goalTurnId === forTurn &&
-      goalTicketId === ticketId;
-    void requestGoalDraft(forTurn, current, true);
-  }
-
-  /**
-   * Waits for the finished turn to be finished, then asks the app for the next user message.
-   *
-   * `turn_end` is where this starts, not what it acts on. The stop control flickers between
-   * phases of one answer, prose stops growing while
-   * a three-minute build runs, and a tool rail goes still both between calls and during one.
-   * So the answer text, the tool rail, the stop control and the app's own count of running
-   * local calls all have to agree, and hold agreeing, before a word is typed into anybody's
-   * chat. An app that cannot be asked counts as busy, exactly as it does for a brief.
-   *
-   * A new generation opening is not a delay — it is the answer: the conversation moved on by
-   * itself, and the message this loop was about to write is about a turn that is no longer
-   * the last one.
-   */
-  async function watchGoalTurn(ended, forTurn) {
-    goalBusy = true;
-    setGoalPhase('settling');
-    const forId = conversationId;
-    const forEpoch = epoch;
-    const current = () => alive && conversationId === forId && epoch === forEpoch && goalTurnId === forTurn;
-    try {
-      const deadline = Date.now() + GOAL_WATCH_MS;
-      let text = finalAnswerText(ended);
-      let activity = briefActivityMark(ended);
-      let stableSince = Date.now();
-      while (Date.now() < deadline) {
-        await sleep(GOAL_POLL_MS);
-        if (!current()) return;
-        // Somebody — the user, or a turn ChatGPT started on its own — is talking again.
-        if (generating) return void setGoalPhase('');
-        if (nativeBusy || (job && job.busy)) return void setGoalPhase('');
-        if (!goalUsable()) return void setGoalPhase('');
-        const nextText = briefSoFar(ended, text);
-        const nextActivity = briefActivityMark(ended);
-        const pending = await peekPendingTools();
-        if (!current()) return;
-        const busy = CLF_DOM.generating() || pending === null || pending > 0;
-        if (busy || nextText !== text || nextActivity !== activity) {
-          text = nextText;
-          activity = nextActivity;
-          stableSince = Date.now();
-          continue;
-        }
-        if (Date.now() - stableSince < GOAL_STABLE_MS) continue;
-        // Tool-only completion belongs to the existing app recovery window. The
-        // confirmed reload/listening receipt will supply a synthetic source ticket;
-        // empty final prose neither stops the mode nor authorizes an immediate draft.
-        if (!text.trim()) {
-          setGoalPhase('');
-          void pullActivity();
-          return;
-        }
-        await requestGoalDraft(forTurn, current);
-        return;
-      }
-      setGoalPhase('settling', 'the answer never stopped changing, so nothing was written');
-    } finally {
-      goalBusy = false;
-      renderControl();
-      injectStage();
-    }
-  }
-
-  /**
-   * Asks again about a turn whose draft failed for a reason another request could answer.
-   *
-   * Deliberately re-entrant through nothing: it holds the same `goalTurnId` claim and re-reads
-   * the same permissions `watchGoalTurn` reads, so a Goal switched off, a user typing, a fresh
-   * generation or a move to another chat ends the loop here for the same reasons it would have
-   * refused to start it.
-   *
-   * **The wait is taken outside the lock.** `goalBusy` is the one thing that makes
-   * `noteGoalTurn` refuse a finished turn, and holding it across a fifteen-second sleep makes
-   * every turn that finishes inside that window invisible — with no later edge to recover it,
-   * because the only edge there is was the turn ending. A single retryable draft failure would
-   * silently cost the next real answer its Goal run. The claim on this turn is `goalTurnId`,
-   * which is what stops two retries of the same turn, and the lock is taken only for the
-   * request it actually guards.
-   */
-  async function retryGoalDraft(forTurn, waiting = false) {
-    if (goalTurnId !== forTurn) return;
-    const forId = conversationId;
-    const forEpoch = epoch;
-    const forTicket = goalTicketId;
-    const current = () => alive && conversationId === forId && epoch === forEpoch &&
-      goalTurnId === forTurn && goalTicketId === forTicket;
-    // Waiting for the app to see the chat finish is not a failed draft: it costs nobody a
-    // provider call, so it is asked again on the plain wait and counts toward no backoff.
-    if (!waiting) goalRetries += 1;
-    await sleep(waiting ? GOAL_RETRY_MS : goalRetryWaitMs || GOAL_RETRY_MS);
-    // A turn that finished during the wait has taken the claim, and this retry is about an
-    // older one. It says nothing and touches nothing: the phase on screen is that turn's now.
-    if (!current()) return;
-    if (goalBusy || goalSourceGenerating() || CLF_DOM.generating() || nativeBusy || (job && job.busy) || !goalUsable()) {
-      // This timer no longer owns a retry. Return its pickup to the existing
-      // activity feed: retaining the claim here strands still-owed recovery after
-      // temporary work/compaction ends. Only a current server obligation can collect
-      // it again; no draft is acknowledged and the elapsed backoff is not bypassed.
-      goalTicketId = null;
-      if (!goalBusy) setGoalPhase('');
-      return;
-    }
-    goalBusy = true;
-    try {
-      await requestGoalDraft(forTurn, current);
-    } finally {
-      goalBusy = false;
-      renderControl();
-      injectStage();
-    }
-  }
-
-  /** Asks the app to draft the next user message. The answer arrives on the activity feed. */
-  function goalRecoveryReady(pending) {
-    return Boolean(pending?.silenceSourceTurnId && (pending.listenUntil ?? 0) <= Date.now() && pendingTools === 0 &&
-      (!generating || (pending.silenceSourceTurnId === turnId &&
-        (pending.acceptedAt >= lastChangeAt || (unwitnessedGeneration && adoptedProgressRevision === turnProgressRevision)))));
-  }
-
-  function goalSourceGenerating(forTurn = goalTurnId) {
-    return generating && !(goalConfig?.pending?.turnId === forTurn && goalRecoveryReady(goalConfig.pending));
-  }
-
-  async function requestGoalDraft(forTurn, current, terminalRequired = false) {
-    goalTypingSince = 0;
-    setGoalPhase('requesting');
-    const reply = await ask({
-      type: 'goal_draft',
-      conversationId,
-      turnId: forTurn,
-      ...(terminalRequired ? { terminalRequired: true } : {})
-    });
-    if (!current()) return;
-    if (!reply || reply.ok !== true) {
-      // HTTP failures retain call()'s { ok, status, data } envelope; worker/transport
-      // failures have top-level fields. Keep the machine code separate from display text.
-      const failure = reply?.data || reply || {};
-      if (failure.error === 'user_input_pending') {
-        // The outbox owns this step. Relinquish only the page's pickup so a
-        // cancelled queue can later collect the still-owed durable Goal turn.
-        goalTurnId = null;
-        goalTicketId = null;
-        setGoalPhase('');
-        return;
-      }
-      // The app still has this chat working — its record of the turn is open, or a local
-      // tool ran within the last minute — so the end this page saw was not the answer. Not
-      // a failure, and not a released claim either: the obligation is filed app-side, and
-      // this document keeps the turn and asks again on a fixed short wait until the app
-      // says the chat has finished. The bar stays on the settling step meanwhile.
-      if (failure.error === 'chat_still_working') {
-        setGoalPhase('settling');
-        void retryGoalDraft(forTurn, true);
-        return;
-      }
-      // The phase is kept rather than collapsed into `failed`: it names the step that
-      // stopped, so the bar draws the run where it ended instead of back at the beginning.
-      setGoalPhase('requesting', replyError(reply) || 'the app did not answer');
-      // A refused request is not a new pickup episode. Releasing its claim here lets
-      // every activity repaint retry immediately, bypassing the existing backoff and
-      // even hammering the bridge's own rate limit. Retain custody through the wait;
-      // settled refusals wait for a deliberate new ticket/settings change instead.
-      const retryable = failure.retryable === true || (!reply || reply.status === 0) ||
-        reply.status === 429 || (reply.status >= 500 && failure.retryable !== false);
-      if (retryable) {
-        goalRetryWaitMs = goalRetryWait();
-        setGoalPhase('retrying', replyError(reply) || 'the app did not answer');
-        void retryGoalDraft(forTurn);
-      }
-      return;
-    }
-    // From here the draft lives on /activity: its stage, its streaming text and — once — the
-    // message to type. See maybeSendGoalReply, which runs on every pull.
-    goalDraft = (reply.data && reply.data.goal) || null;
-    setGoalPhase('drafting');
-    void pullActivity();
-  }
-
-  /**
-   * Types a ready draft into the composer and sends it, once.
-   *
-   * Called from the activity pull, because that is where the draft arrives. Every exit
-   * acknowledges the draft: a message that was sent and one that will never be sent are the
-   * same fact to the app — this draft is spent — and the difference between them is what the
-   * user is told, not what the app holds.
-   *
-   * The composer belongs to the user. `insertPrompt` refuses one that already holds text, so
-   * a half-written message is never overwritten; this waits a while for it to be free and
-   * then gives up honestly rather than typing over somebody mid-sentence.
-   */
-  async function deferGoalDraftForWork(draft) {
-    const target = draft.conversationId, forEpoch = epoch;
-    rememberGoalSpent(target, `busy:${draft.token}`);
-    if (goalDraft?.token === draft.token) goalDraft = null;
-    const wasBusy = goalBusy;
-    goalBusy = true;
-    setGoalPhase('settling');
-    try {
-      const result = await ask({ type: 'goal_ack', conversationId: target, token: draft.token, nativeBusy: true });
-      if (!alive || epoch !== forEpoch || conversationId !== target || !result?.ok) return;
-      if (goalTurnId === draft.turnId) { goalTurnId = null; goalTicketId = null; }
-      setGoalPhase('');
-    } finally {
-      if (alive && epoch === forEpoch && conversationId === target) goalBusy = wasBusy;
-    }
-  }
-
-  async function maybeSendGoalReply() {
-    const draft = goalDraft;
-    if (!draft || !conversationId || draft.conversationId !== conversationId) return;
-    const target = conversationId, forEpoch = epoch;
-    const workRevision = turnProgressRevision;
-    const onDocument = () => alive && epoch === forEpoch && conversationId === target && CLF_DOM.conversationId() === target;
-    if (goalBusy) return;
-    if (goalWasSpent(conversationId, draft.token)) {
-      // The message already crossed the browser's irreversible boundary. A lost ACK may make
-      // the app re-offer it, including after a content-script reload; only retry the receipt.
-      goalDraft = null;
-      await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
-      return;
-    }
-    if (goalWasSpent(conversationId, `busy:${draft.token}`)) return deferGoalDraftForWork(draft);
-    if (goalConfig?.queuePending) return;
-    if (!goalUsable()) {
-      // Settings are live. Turning Goal Mode off (or removing its key) while OpenRouter is
-      // drafting must revoke permission to type the result, even if that result becomes ready
-      // on the very poll that carries the new setting.
-      goalDraft = null;
-      setGoalPhase('');
-      await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
-      return;
-    }
-    if (draft.stage === 'failed') {
-      goalDraft = null;
-      const why = draft.message || draft.error || `${draft.backend === 'chatgpt' ? 'ChatGPT helper' : draft.backend === 'templates' ? 'Offline templates' : goalConfig && goalConfig.provider === 'custom' ? 'custom endpoint' : 'OpenRouter'} did not answer`;
-      const pending = goalConfig && goalConfig.pending;
-      let retrying = draft.retryable === true && goalTurnId === draft.turnId;
-      // A reload loses the document-local claim while the app keeps both the failed attempt
-      // and the durable obligation it was answering. Only that exact durable turn may restore
-      // the claim: trusting an arbitrary old draft would let a stale tab answer after the chat
-      // moved on. Active ChatGPT/native work is newer evidence and wins.
-      if (
-        !retrying &&
-        draft.retryable === true &&
-        !goalTurnId &&
-        pending &&
-        pending.turnId === draft.turnId &&
-        !goalSourceGenerating(draft.turnId) &&
-        !CLF_DOM.generating() &&
-        !nativeBusy &&
-        !(job && job.busy)
-      ) {
-        goalTurnId = draft.turnId;
-        retrying = true;
-      }
-      if (retrying) goalRetryWaitMs = goalRetryWait();
-      setGoalPhase(retrying ? 'retrying' : 'drafting', why);
-      await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
-      // The two answers that end a Goal run are `[no reply]` and words to type. This is
-      // neither, so the turn is still owed one and the loop keeps its claim on it — with the
-      // reason on screen in the meantime, which is the only thing a failure was ever good for.
-      if (retrying) void retryGoalDraft(draft.turnId);
-      return;
-    }
-    if (draft.stage === 'no-reply') {
-      // The model read the conversation and decided the thing the user asked for is done.
-      // That is the loop ending the way it is meant to, not a failure.
-      goalDraft = null;
-      setGoalPhase('done');
-      await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
-      return;
-    }
-    if (draft.stage !== 'ready' || !draft.reply) return;
-    // A turn started while the draft was being written — the user typed, or ChatGPT began
-    // something of its own. The draft is about a conversation that has moved on.
-    const sourceBusy = () => goalSourceGenerating(draft.turnId) || CLF_DOM.generating() || pendingTools > 0 ||
-      nativeBusy || job?.busy || turnProgressRevision !== workRevision;
-    if (sourceBusy()) {
-      await deferGoalDraftForWork(draft);
-      return;
-    }
-    goalBusy = true;
-    const composerBefore = CLF_DOM.composer()?.textContent || '';
-    let preparedDraft = null, sendAttempted = false, workResumed = false;
-    try {
-      if (goalTypingSince === 0) goalTypingSince = Date.now();
-      setGoalPhase('sending');
-      // After whatever is already in the box, never instead of it and never blocked by it:
-      // a character left behind is not somebody's draft, and the loop waiting on it was the
-      // loop stopped for no reason. A refusal here is a composer that cannot be written to at
-      // all; keep the draft and try again on the next pull, until the window runs out — at
-      // which point the message is dropped rather than queued forever.
-      if (!CLF_DOM.insertPrompt(draft.reply, 'append')) {
-        if (Date.now() - goalTypingSince < GOAL_TYPING_WINDOW_MS) return;
-        goalDraft = null;
-        setGoalPhase('sending', 'the message box was in use, so nothing was sent');
-        await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
-        return;
-      }
-      // Reuse the same exact editor/draft lease as desktop delivery. Cancellation
-      // must not restore text into a replacement editor or a user's intervening edit.
-      preparedDraft = CLF_DOM.captureComposerDraft(CLF_DOM.composer()?.textContent || '', onDocument);
-      await sleep(200);
-      const current = () => onDocument() && goalUsable() &&
-        (sendAttempted || (((goalConfig?.afterTurn !== true && !goalConfig?.pending?.silenceSourceTurnId) || turnProgressRevision === workRevision) &&
-          goalDraft?.token === draft.token && preparedDraft.current()));
-      if (!current()) return;
-      const sent = await sendSubmittedText(current, true, async sendCurrent => {
-        // Off or a replacement task retires this exact token in the app. Re-read it
-        // when native Send is ready, including after a delayed React update.
-        const authorization = await ask({ type: 'activity', conversationId: target, since });
-        if (onDocument() && (sourceBusy() || authorization?.data?.pendingTools > 0 || authorization?.data?.job?.busy)) {
-          workResumed = true;
-          return false;
-        }
-        if (!sendCurrent() || !current() || !authorization?.ok || !authorization.data) return false;
-        const allowed = authorization.data.goal;
-        const ready = allowed?.draft;
-        if (!allowed || !ready || ready.token !== draft.token || ready.stage !== 'ready' || ready.reply !== draft.reply ||
-            !(allowed.enabled === true || (allowed.own !== true && allowed.objective)) || allowed.hasKey !== true ||
-            allowed.blocked || allowed.queuePending || authorization.data.job?.busy || authorization.data.pendingTools > 0 ||
-            goalSourceGenerating() || CLF_DOM.generating() || nativeBusy || job?.busy) return false;
-        rememberUserSend();
-        sendAttempted = true;
-        return true;
-      });
-      if (!onDocument() || !sendAttempted) return;
-      const ownsDraft = goalDraft?.token === draft.token;
-      if (ownsDraft) goalDraft = null;
-      if (!sent) {
-        await ask({ type: 'goal_ack', conversationId: target, token: draft.token }).catch(() => undefined);
-        if (ownsDraft) setGoalPhase('sending', 'ChatGPT would not send the message');
-        return;
-      }
-      // Sending is the irreversible step. Record it before the fallible ACK hop so a lost
-      // receipt can never turn the same ready draft into a second user message.
-      rememberGoalSpent(target, draft.token);
-      await ask({ type: 'goal_ack', conversationId: target, token: draft.token }).catch(() => undefined);
-      if (ownsDraft && !goalDraft) setGoalPhase('');
-    } finally {
-      // Undo only our unchanged, definitely pre-wire insertion. Never erase a user's
-      // intervening edit or roll back an ambiguous native send.
-      if (!sendAttempted && preparedDraft?.current())
-        CLF_DOM.insertPrompt(composerBefore, true);
-      preparedDraft?.dispose();
-      if (!onDocument()) return;
-      if (!sendAttempted && (workResumed || sourceBusy())) await deferGoalDraftForWork(draft);
-      goalBusy = false;
-      // Only once the draft is spent. This marks when *this draft* first found the composer
-      // in use, and the retry path above measures its two-minute patience against it — so
-      // clearing it on every pull, as this used to, restarted the window each time and the
-      // give-up could never arrive. A draft that is still waiting keeps its start time.
-      if (!goalDraft) goalTypingSince = 0;
-      renderControl();
-      injectStage();
-    }
   }
 
   /** How long to wait for ChatGPT to actually stop after the stop button is pressed. */
@@ -9854,83 +7944,6 @@
   }
 
   /**
-   * The one first answer a Compact & Resume bootstrap can make before this hidden page ever
-   * observes a live generation.
-   *
-   * This is deliberately page provenance, not "the newest finished answer" recovery. Merely
-   * opening an old resumed conversation must never restart Goal from transcript history. The
-   * marker exists only after this document itself sent a resume bootstrap and the app ACKed the
-   * A→B continuation commit. sessionStorage keeps that proof across a content-script reload in
-   * the same tab without turning it into durable chat state that could fire days later.
-   */
-  const RESUME_GOAL_STORAGE = 'clf-resume-goal-v1';
-  let resumeGoalPending = null;
-  try {
-    const restored = JSON.parse(sessionStorage.getItem(RESUME_GOAL_STORAGE) || 'null');
-    if (
-      restored &&
-      typeof restored === 'object' &&
-      typeof restored.conversationId === 'string' &&
-      restored.conversationId.length > 0 &&
-      restored.conversationId.length <= 256 &&
-      typeof restored.commandId === 'string' &&
-      restored.commandId.length > 0 &&
-      restored.commandId.length <= 200
-    ) {
-      resumeGoalPending = {
-        conversationId: restored.conversationId,
-        commandId: restored.commandId,
-        turnId: typeof restored.turnId === 'string' && restored.turnId ? restored.turnId.slice(0, 200) : null
-      };
-    }
-  } catch {
-    // A corrupt/blocked entry loses only this one recovery hint. Ordinary observed turns still
-    // drive Goal exactly as before.
-  }
-
-  function clearResumeGoalPending() {
-    resumeGoalPending = null;
-    try {
-      sessionStorage.removeItem(RESUME_GOAL_STORAGE);
-    } catch {
-      // In-memory ownership is enough for the live document.
-    }
-  }
-
-  function persistResumeGoalPending() {
-    try {
-      sessionStorage.setItem(RESUME_GOAL_STORAGE, JSON.stringify(resumeGoalPending));
-    } catch {
-      // The live document can still recover the turn; reload recovery is best effort.
-    }
-  }
-
-  function rememberResumeGoalPending(conversation, commandId) {
-    resumeGoalPending = { conversationId: conversation, commandId, turnId: null };
-    persistResumeGoalPending();
-    // The generation this provenance is about may already be open: a turn now begins the
-    // moment the bootstrap message is observed, which can land before the command finishes
-    // redeeming. Binding only from the opener left that turn unclaimed and made the recovery
-    // mint a synthetic `g-resume-<command>` id for a generation this document had watched
-    // start. Both orderings reach the same binding from here.
-    if (generating) bindResumeGoalTurn(turnId);
-  }
-
-  function bindResumeGoalTurn(localTurnId) {
-    if (!resumeGoalPending || resumeGoalPending.conversationId !== conversationId || !localTurnId) return;
-    if (resumeGoalPending.turnId && resumeGoalPending.turnId !== localTurnId) {
-      // A second local generation means the conversation has already moved beyond the bootstrap
-      // answer this marker was allowed to recover.
-      clearResumeGoalPending();
-      return;
-    }
-    if (!resumeGoalPending.turnId) {
-      resumeGoalPending.turnId = localTurnId;
-      persistResumeGoalPending();
-    }
-  }
-
-  /**
    * The exact existing worker chat is genuinely safe for another user message.
    *
    * Broker terminality is intentionally absent from this predicate. `agents finish` says the
@@ -9940,7 +7953,7 @@
   function revivalSubmitReady(target) {
     if (!commandReadinessInitialized || !alive || CLF_DOM.conversationId() !== target) return false;
     if (generating || CLF_DOM.generating()) return false;
-    if (pendingTools > 0 || nativeBusy || goalBusy || (job && job.busy)) return false;
+    if (pendingTools > 0 || nativeBusy || (job && job.busy)) return false;
     return Boolean(CLF_DOM.composerSubmitReady && CLF_DOM.composerSubmitReady());
   }
 
@@ -10437,7 +8450,6 @@
     // outbox's, not the app's.
     if (boot.type === 'resume') {
       const found = bootstrapConversation();
-      if (found) rememberResumeGoalPending(found, boot.id);
     }
 
     // A revival already names and repeatedly proved the exact conversation before the send.
@@ -10462,7 +8474,6 @@
       await sleep(500);
       const found = boot.type === 'resume' ? bootstrapConversation() : CLF_DOM.conversationId();
       if (found) {
-        if (boot.type === 'resume') rememberResumeGoalPending(found, boot.id);
         publishBootstrapSelection(found);
         const acknowledged = await ask({ type: 'ack', id: boot.id, status: 'sent', conversationId: found, agent, client: RUN_ID });
         await clearAcknowledgedBootstrap(acknowledged);
@@ -10537,16 +8548,11 @@
   function currentActivityPullDelay() {
     const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
     const active = nativeBusy || Boolean(job && job.busy) || pendingTools > 0;
-    // A goal draft lives entirely on this feed — its streamed text is what the stage panel
-    // shows, and the finished message only arrives here — so it polls at the live cadence
-    // even in a hidden tab, which is exactly the tab this feature runs in.
-    const drafting =
-      Boolean(goalDraft) || goalPhase === 'requesting' || goalPhase === 'drafting' || goalPhase === 'retrying';
     return activityPullDelay({
       hidden,
       generating,
       active,
-      drafting,
+      drafting: false,
       presentationPending: presentationPending()
     });
   }
@@ -10756,7 +8762,7 @@
       (recordedFinal || fiberTerminalMessageId === terminal) && fiberTurnFor(currentAssistantTurn())?.endMessageId === terminal);
   }
 
-  /** Both final-driven Goal/Loop and unfinished Continue settle the same native control. */
+  /** Unfinished Continue work settles through the same native control. */
   async function stopAutomationGeneration(safe) {
     if (!safe()) return false;
     recoveryStopping = true;
@@ -10811,7 +8817,7 @@
   async function acceptDesktopInput(message) {
     const silencePickup = typeof message.silenceTurnId === 'string';
     let sourceQuiet = silencePickup;
-    if (desktopInputBusy || modelCatalogBusy || !alive || (generating && !message.directTurn && !silencePickup) || pendingTools > 0 || goalBusy || job?.busy) return false;
+    if (desktopInputBusy || modelCatalogBusy || !alive || (generating && !message.directTurn && !silencePickup) || pendingTools > 0 || job?.busy) return false;
     const target = message.conversationId || null;
     const forEpoch = epoch;
     const sourceTurn = turnId;
@@ -11510,14 +9516,10 @@
     globalThis.CLF_TEST_HOOK({
       controlState,
       stageView,
-      goalStageView,
       settingsView,
       toggleMenu,
       closeMenu,
       renderControl,
-      noteGoalTurn,
-      maybeSendGoalReply,
-      GOAL_STABLE_MS,
       emit,
       flush,
       observe,

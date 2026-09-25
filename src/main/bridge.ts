@@ -2,12 +2,10 @@ import { conversationProgress } from './session/progress.js';
 import { messageReaction } from '../shared/message-reaction.js';
 import { browserControl } from './browser-control.js';
 import type { BrowserResult } from '../shared/browser-control.js';
-import { goalErrorMessage } from '../shared/goal-errors.js';
 import { MAX_CHATGPT_MESSAGE_CHARS, userPromptText } from '../shared/user-prompt.js';
 import { prepareSessionPrompt } from './session/prompt.js';
 import { pendingChatModelRequest, observeChatModels, requestChatModels } from './chat-models.js';
 import { isProModel } from '../shared/chat-models.js';
-import { supportsFinishAutomation } from '../shared/finish.js';
 import { injectedUserMessage, recordedRequestTurn, responseTurnId } from '../shared/chronology.js';
 import type { SessionSummary } from '../shared/session.js';
 import { publishBrowserDecision, authorizeBrowserInput, sessionInputPolicy, collectRecordedBrowserDecision, type InputActivity } from './session/input.js';
@@ -18,8 +16,8 @@ let browserWake: ReturnType<typeof attachBrowserWake> | null = null;
 import { browserWindowBounds, currentBrowserWorkArea } from './browser-window-layout.js';
 export { setBrowserWorkArea } from './browser-window-layout.js';
 import { pendingBrowserPreferenceRequest, acknowledgeBrowserPreferences } from './browser-preferences.js';
-import { sessionFinishHeld, releaseSessionFinish, getSessionFinishDraft, sessionFinishWaiting } from './session/finish.js';
-import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, fileRecoveryInput, advanceRecoveryInput, hasQueuedAfterTurnInput, inputBeforeGoal, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs } from './session/input.js';
+import { sessionFinishHeld, releaseSessionFinish, sessionFinishWaiting } from './session/finish.js';
+import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, fileRecoveryInput, advanceRecoveryInput, hasQueuedAfterTurnInput, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs } from './session/input.js';
 /**
  * The local bridge between the Chrome extension and this app.
  *
@@ -52,40 +50,6 @@ import { isChatBlocked, chatBlockedAt } from './session/blocked-chats.js';
 export { CHAT_ACTIVE_MS, CHAT_SILENCE_MS } from '../shared/session.js';
 import { effectiveCapabilities, getConfig, updateConfig } from './config.js';
 import { getSecret, secureStorageStatus, setSecret } from './secrets.js';
-import {
-  acceptGoalReplyNow,
-  astraFinishOnly,
-  loopAfterTurnFor,
-  loopReplyHasAuthority,
-  deferSilenceGoalReplyNow,
-  claimGoalRecoveryStopNow,
-  ackGoalDraftNow,
-  applyGoalSwitch,
-  beginGoalDraft,
-  discardPreparedGoalDraft,
-  draftOpeningMessage,
-  goalKeyPresent,
-  registerGoalDecisionChat,
-  isGoalDecisionChat,
-  goalProgressFor,
-  goalDraftBusy,
-  goalArmedFor,
-  goalObjectiveFor,
-  goalPendingReplyFor,
-  goalReplySourceTurn,
-  consumeGoalReplyForInputNow,
-  goalSwitchFor,
-  goalViewFor,
-  pendingGoalReplies,
-  retireGoalDrafts,
-  goalDraftNeedsIntervention,
-  retireGoalDraftsFor,
-  setGoalReplyActiveNow,
-  withdrawSilenceGoalReplyNow,
-  setGoalObjectiveNow,
-  setGoalSwitchNow,
-  startGoalDraft
-} from './goal.js';
 import { logInfo, logWarn } from './logger.js';
 import {
   closeConversation,
@@ -476,7 +440,7 @@ export interface BridgeCommand {
    * Why this chat is being opened.
    *
    * The content script needs this after a successful fresh-chat ACK: only a Compact & Resume
-   * replacement is allowed to arm the one-turn hidden-tab Goal recovery provenance. A worker
+   * replacement is allowed to arm the one-turn hidden-tab recovery provenance. A worker
    * bootstrap must never do that, while a revival already names an existing chat. Keep the
    * command kind explicit on the wire rather than asking the browser to infer authority from
    * nullable agent/conversation fields.
@@ -771,14 +735,6 @@ export async function unpair(): Promise<void> {
 }
 
 // ------------------------------------------------------------------ helpers
-
-/** Goal wire errors keep their code/retry policy and add a user-facing explanation. */
-function goalJson(res: http.ServerResponse, status: number, body: unknown, origin: string | null): void {
-  if (body && typeof body === 'object' && 'error' in body && typeof body.error === 'string' && !('message' in body)) {
-    body = { ...body, message: goalErrorMessage(body.error) };
-  }
-  json(res, status, body, origin);
-}
 
 function json(res: http.ServerResponse, status: number, body: unknown, origin: string | null): void {
   const payload = JSON.stringify(body);
@@ -1140,14 +1096,6 @@ function parseObservations(input: unknown): ChatObservation[] {
     if (((kind === 'turn_end' && observation.outcome === 'failed') || kind === 'chat_error') && item['reason'] === 'thinking_failed') {
       observation.reason = 'thinking_failed';
     }
-    if (
-      item['goalEligible'] === true &&
-      kind === 'assistant_message' &&
-      item['final'] === true &&
-      item['state'] === 'final'
-    ) {
-      observation.goalEligible = true;
-    }
     if (typeof item['detail'] === 'string') observation.detail = item['detail'].slice(0, 500);
     if (typeof item['recoverable'] === 'boolean') observation.recoverable = item['recoverable'];
     if (item['blocking'] === true) observation.blocking = true;
@@ -1177,7 +1125,7 @@ async function workerFinalAcrossBatches(
 ): Promise<string | null> {
   if (observations && !observations.some(entry => entry.kind === 'turn_end' ||
       (entry.kind === 'assistant_message' && (entry.final === true || entry.state === 'final')))) return null;
-  // Share the same current-question/current-work fence as Continue and Goal. This also
+  // Share the same current-question/current-work fence as Continue. This also
   // accepts exact native image finals and reloads that lost the page-local turn id.
   const final = await readCompletedFinal(sessionId, conversationId);
   return final ? final.text || 'Worker completed its native final answer.' : null;
@@ -1332,45 +1280,14 @@ function activityStoredPreview(stored: StoredText, result = false): { text: stri
   };
 }
 
-/**
- * May the goal loop write the next message in this chat?
- *
- * The switch is one setting, but it is the *prime's* setting. A spawned worker already has
- * an author for its user turns — the prime, through the agents tool — and its brief is the
- * whole of the objective it was given. Letting the loop type into it too puts two hands on
- * one wheel: the worker answers a question its prime never asked, finishes against that
- * instead, and reports back work nobody ordered. Worse, every worker in a run would be
- * spending OpenRouter credit in parallel on drafts the prime is about to override anyway.
- *
- * So: on for the prime, on for an ordinary solo chat that has never been a worker, and off for
- * every active, dormant or explicitly retired worker, whatever the global switch says. Worker
- * identity outlives the scarce active-run claim, so this check uses durable ownership/fences
- * rather than treating `run === null` as proof that a chat is solo.
- */
-export function goalWorkerChat(id: string): boolean {
-  // Membership in any state, not the owner lookup: a worker chat remains a worker forever —
-  // parked with its run, finished at the context ceiling, or retired after the run — and the
-  // loop must never author user turns in it, nor a Compact & Resume be typed into it. The owner
-  // lookup deliberately forgets a worker that is over, which is how two ceiling-finished workers
-  // were compacted like plain chats on 2026-09-03.
-  return isGoalDecisionChat(id) || isWorkerConversation(id) || retiredWorkerForConversation(id) !== null;
+/** A worker chat remains worker-owned even after its active run retires. */
+export function managedWorkerChat(id: string): boolean {
+  return isWorkerConversation(id) || retiredWorkerForConversation(id) !== null;
 }
 
-/**
- * Is the loop kept out of this chat, and why?
- *
- * Two reasons, one gate. A worker chat is the prime's to write (see goalWorkerChat). A chat
- * the user **blocked** in the app is one they took this app's hands off: its tool calls are
- * refused, so a loop, a goal or an automatic compaction that kept typing into it would drive
- * ChatGPT on without the tools every one of those turns assumes — the model would answer
- * `CHAT_BLOCKED` refusals for as long as the loop kept asking. Block therefore stops the
- * loop as well as the tools, and releasing the chat is what brings the loop back: the
- * stored goal and switch are kept, only their effect is suspended. Reported to the page as
- * `goal.blocked` so the switch drawn off says why. Worker wins when both apply, because that
- * one never lifts.
- */
-function goalBlockReason(id: string): 'worker' | 'blocked' | '' {
-  if (goalWorkerChat(id)) return 'worker';
+/** Shared gate for app-authored maintenance such as Compact & Resume. */
+function conversationBlockReason(id: string): 'worker' | 'blocked' | '' {
+  if (managedWorkerChat(id)) return 'worker';
   if (isChatBlocked(id)) return 'blocked';
   return '';
 }
@@ -1380,10 +1297,6 @@ export type SessionControlsView = {
   recovery?: import('../shared/recovery.js').RecoveryCountdown[];
   plan: import('../shared/agent-plan.js').AgentPlan | null;
   conversationId: string;
-  automation: 'off' | 'goal' | 'loop';
-  loopAfterTurn?: boolean;
-  proLoopDelivery?: boolean;
-  objective: string;
   activeTurnId: string | null;
   finishHeld: boolean;
   queueAtFinish?: boolean;
@@ -1391,9 +1304,6 @@ export type SessionControlsView = {
   canSendDirectly?: boolean;
   finishWaiting?: boolean;
   stopPending?: boolean;
-  goalDraft?: Pick<import('./goal.js').GoalDraftView, 'stage' | 'model' | 'text' | 'error'> | null;
-  goalWait?: import('../shared/goal.js').GoalWait | null;
-  finishGoalDraft?: Pick<import('./goal.js').GoalDraftView, 'stage' | 'model' | 'text' | 'error'> | null;
   blocked: 'worker' | 'blocked' | '';
   job: ResumeJobView | null;
 };
@@ -1407,15 +1317,12 @@ async function controlledConversation(sessionId: string): Promise<string> {
   if ((await getSession(sessionId))?.conversationId !== id) throw new Error('conversation_changed');
   return id;
 }
+
 export async function sessionControlsFor(sessionId: string): Promise<SessionControlsView> {
   const id = await controlledConversation(sessionId);
-  const control = goalSwitchFor(id);
-  const blocked = goalBlockReason(id);
+  const blocked = conversationBlockReason(id);
   const session = await getSession(sessionId);
   if (session?.conversationId !== id) throw new Error('conversation_changed');
-  // A persisted start is history, not proof that the provider is still generating.
-  // Reuse the recorder's process-local observation (or an exact attributed running
-  // tool) so opening old recordings after restart cannot resurrect Stop/Working.
   const live = liveConversations().find(entry => entry.conversationId === id && entry.sessionId === sessionId);
   const activityExpiry = sessionActivityExpiresAt(session);
   const stopping = commands.some(c => c.spec.type === 'stop' && c.spec.sessionId === sessionId && c.spec.turnId === session.activeTurnId);
@@ -1423,25 +1330,14 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
     (stopping || runningToolCalls(id) > 0 || (activityExpiry !== undefined ? activityExpiry !== null && activityExpiry > Date.now() :
       live?.activeTurnId === session.activeTurnId)) ? session.activeTurnId : null;
   const finishHeld = !blocked && await sessionFinishHeld(sessionId, activeTurnId, id);
-  const draft = goalViewFor(id);
   const inputPolicy = await sessionInputPolicy(sessionId, sessionInputActivity(session));
   const plan = await readSessionPlan(sessionId);
   const finishWaiting = await sessionFinishWaiting(sessionId, activeTurnId, id);
   const recovery = await sessionRecoveryCountdowns(sessionId, id);
-  return { sessionId, plan, conversationId: id, activeTurnId, finishHeld,
-    recovery,
+  return { sessionId, plan, conversationId: id, activeTurnId, finishHeld, recovery,
     queueAtFinish: !blocked && inputPolicy.queueAtFinish, canInject: !blocked && inputPolicy.canInject,
-    canSendDirectly: !blocked && !!inputPolicy.directTurn,
-    finishGoalDraft: getSessionFinishDraft(sessionId, activeTurnId),
-    finishWaiting,
-    goalDraft: draft ? { stage: draft.stage, model: draft.model, text: draft.text.slice(-8000), error: draft.error } : null,
-    goalWait: !blocked && !draft && goalActiveFor(id) ? await goalWaitFor(id, sessionId) : null,
+    canSendDirectly: !blocked && !!inputPolicy.directTurn, finishWaiting,
     stopPending: commands.some(c => c.spec.type === 'stop' && c.spec.sessionId === sessionId && c.spec.turnId === activeTurnId),
-    objective: goalObjectiveFor(id),
-    loopAfterTurn: control.afterTurn,
-    proLoopDelivery: control.enabled && getConfig().ui.finishTool === true && session.selectedModel?.conversationId === id &&
-      supportsFinishAutomation(control.mode, session.selectedModel.model, session.selectedModel.reasoningEffort),
-    automation: goalArmedFor(id) && !blocked ? control.enabled ? control.mode : 'goal' : 'off',
     blocked, job: resumeJobFor(sessionId) };
 }
 /** One absolute budget includes opening an absent tab and native hydration. */
@@ -1466,8 +1362,6 @@ export async function stopSessionTurn(sessionId: string, expectedTurnId: string)
     if (latest?.conversationId !== id || latest.activeTurnId !== expectedTurnId || !expectedTurnId ||
         await conversationWasSuperseded(id) || (await sessionControlsFor(sessionId)).activeTurnId !== expectedTurnId) throw new Error('active_turn_changed');
   };
-  await assertCurrent();
-  await setSessionAutomation(sessionId, 'off');
   await assertCurrent();
   if (continuationForSession(sessionId)) { await cancelResumeNow(sessionId); await assertCurrent(); }
   const userMessageId = await stopUserAnchor(sessionId, expectedTurnId);
@@ -1522,72 +1416,10 @@ async function pendingStopCommands(): Promise<Array<{ id: string; conversationId
   }
   return pending;
 }
-/** Switch activation cannot spend a live generation or silence-recovery window. */
-function activateConversationGoalReply(id: string, active: boolean): Promise<boolean> {
-  const grant = activeUntil.get(id);
-  const idle = (silenceSourceTurnId?: string) => {
-    const live = liveConversations().find(row => row.conversationId === id);
-    return activeUntil.get(id) === grant && runningToolCalls(id) === 0 &&
-      (!chatIsWorking(id) || (!!silenceSourceTurnId && live?.activeTurnId === silenceSourceTurnId)) &&
-      observationWritesInFlight === 0 && (!grant || grant.until <= Date.now());
-  };
-  return setGoalReplyActiveNow(id, active, idle);
-}
-
-/** Both UIs write the existing objective/switch/ticket authorities in the same order. */
-async function saveConversationObjective(id: string, text: string, named: 'goal' | 'loop' | null,
-  assertCurrent: () => Promise<void> = async () => undefined) {
-  await assertCurrent();
-  if (goalWorkerChat(id)) throw new Error('goal_worker_chat');
-  if (text.trim() && await conversationWasSuperseded(id)) throw new Error('conversation_superseded');
-  if (text.trim() && isChatBlocked(id)) throw new Error('chat_blocked');
-  let chatSwitch: { enabled: boolean; mode: 'goal' | 'loop' } | null = null;
-  if (named) {
-    const held = goalSwitchFor(id);
-    const on = text.trim().length > 0;
-    const which = on ? named : held.enabled ? held.mode : named;
-    await assertCurrent();
-    try { chatSwitch = await setGoalSwitchNow(id, which, on); }
-    catch { throw new Error('goal_switch_not_durable'); }
-  }
-  await assertCurrent();
-  const objective = await setGoalObjectiveNow(id, text);
-  await assertCurrent();
-  try {
-    await activateConversationGoalReply(id,
-      goalActiveFor(id) && getConfig().sessions.record && await goalKeyPresent(goalModeFor(id)));
-    forgetGoalWatch(id);
-  } catch { throw new Error('goal_ticket_not_durable'); }
-  changed();
-  return { objective, ...(chatSwitch ? { enabled: chatSwitch.enabled, own: true, mode: chatSwitch.mode } : {}) };
-}
-export async function setSessionObjective(sessionId: string, text: string, mode: 'goal' | 'loop'): Promise<SessionControlsView> {
-  const id = await controlledConversation(sessionId);
-  await saveConversationObjective(id, text, mode, async () => {
-    if (await controlledConversation(sessionId) !== id) throw new Error('conversation_changed');
-  });
-  return sessionControlsFor(sessionId);
-}
-export async function setSessionAutomation(sessionId: string, automation: SessionControlsView['automation'], afterTurn?: boolean): Promise<SessionControlsView> {
-  const id = await controlledConversation(sessionId);
-  if (automation !== 'off' && goalBlockReason(id)) throw new Error(goalWorkerChat(id) ? 'worker_goal_disabled' : 'chat_blocked');
-  const mode = automation === 'off' ? goalSwitchFor(id).mode : automation;
-  // The existing reply setter retires drafts and durably closes the pickup for Off.
-  const held = await setGoalSwitchNow(id, mode, automation !== 'off', afterTurn);
-  if (!loopAfterTurnFor(id) && goalPendingReplyFor(id)?.silencePro) await revokeSilenceLoop(id);
-  const keyPresent = held.enabled && await goalKeyPresent(mode);
-  if (await controlledConversation(sessionId) !== id) throw new Error('conversation_changed');
-  const live = goalSwitchFor(id);
-  await activateConversationGoalReply(id, held.enabled && live.enabled && live.mode === held.mode && !goalBlockReason(id)
-    && getConfig().sessions.record && keyPresent);
-  forgetGoalWatch(id);
-  changed();
-  return sessionControlsFor(sessionId);
-}
 /** One ticket publication boundary shared by browser and app controls. */
 async function fileCompactionTicket(sessionId: string, id: string, automatic = false) {
   if (await controlledConversation(sessionId) !== id) throw new Error('conversation_changed');
-  if (goalWorkerChat(id)) throw new Error('worker_compaction_disabled');
+  if (managedWorkerChat(id)) throw new Error('worker_compaction_disabled');
   if (isChatBlocked(id)) throw new Error('chat_blocked');
   if (automatic && !automaticCompactionAllowed(await getSession(sessionId))) throw new Error('automatic_compaction_disabled');
   const existing = continuationForSession(sessionId);
@@ -1613,48 +1445,10 @@ export async function cancelSessionCompaction(sessionId: string): Promise<Sessio
   return sessionControlsFor(sessionId);
 }
 
-/** A chat the loop may not drive — by role, or by the user's block. */
-function goalFencedChat(id: string): boolean {
-  return goalBlockReason(id) !== '';
-}
-
-function goalEnabledFor(id: string): boolean {
-  if (goalFencedChat(id)) return false;
-  return goalSwitchFor(id).enabled;
-}
-
-/**
- * Which of the two standing modes this chat's switch is in.
- *
- * Sent beside `enabled` rather than as a second boolean, because that is what makes the pair
- * mutually exclusive everywhere they are drawn: one field with one value, so no page and no
- * poll can ever paint both switches on. A chat where the loop may not act reports the mode it
- * *would* run, which the page never draws — `enabled: false` already answered the question.
- */
-function goalModeFor(id?: string): 'goal' | 'loop' {
-  return id ? goalSwitchFor(id).mode : getConfig().goal.mode;
-}
-
-/**
- * May the loop act in this chat at all — by the switch, or by this chat's own goal?
- *
- * The switch is the standing rule for every chat: keep going whenever ChatGPT itself says
- * something it was asked for is unfinished. A *specific goal* is one chat's own instruction,
- * given deliberately, naming the finish line; asking somebody to also find and flip a global
- * switch before the goal they just typed does anything would be asking them to say yes twice.
- * So either is enough — until this chat answers for itself, which is what goalArmedFor() adds:
- * the composer's mode slider has an Off position and Off has to mean off. The worker rule
- * overrides all of it, because there the prime is already the author of the user's turns.
- */
-function goalActiveFor(id: string): boolean {
-  if (goalFencedChat(id)) return false;
-  return goalArmedFor(id);
-}
-
 /** Policy gate only: the live silence grant files the outbox's exact recovery claim. */
 export function recoveryInputAllowed(sessionId: string, id: string): boolean {
-  return (goalActiveFor(id) || getConfig().ui.autoContinue !== false) && !goalFencedChat(id) &&
-    !isChatBlocked(id) && !stopRequestedFor(id) && !continuationForSession(sessionId);
+  return getConfig().ui.autoContinue === true && !conversationBlockReason(id) &&
+    !stopRequestedFor(id) && !continuationForSession(sessionId);
 }
 
 // -------------------------------------------------------------------- routes
@@ -1980,13 +1774,6 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           !['browser', 'decision', 'sent', ...(entry.purpose !== 'decision' && route === '/input/ack' ? ['cancelled'] : [])].includes(entry.state)) {
         return json(res, 409, { error: 'input_not_pending' }, origin);
       }
-      if (entry.purpose === 'decision' && entry.lifetime !== 'temporary-planner') {
-        const helperConversation = conversationId(body.conversationId);
-        if (!helperConversation) return json(res, 409, { error: 'helper_conversation_not_ready' }, origin);
-        // Role is durable before acknowledging a send or releasing its answer. A helper
-        // never inherits Goal/Loop or recovery authority, even after master Off/On.
-        await registerGoalDecisionChat(helperConversation, entry.decisionSourceSessionId);
-      }
       if (route === '/input/answer') return json(res, 200, { ok: typeof body.response === 'string' && await completeBrowserDecision(body.id, body.owner, body.response, deliveredConversation) }, origin);
       const acknowledged = await acknowledgeBrowserInput(body.id, body.owner, deliveredConversation, typeof body.messageId === 'string' ? body.messageId : undefined);
       if (acknowledged && deliveredConversation) await collectRecordedBrowserDecision(deliveredConversation);
@@ -2162,28 +1949,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         if (woke?.revived) tidyCommands();
       }
       if (!superseded && result.sessionId) await collectRecordedBrowserDecision(id);
-      // The stable assistant message, not the page-local turn id, is the exactly-once Goal
-      // checkpoint. Freeze app config/key policy before 200 lets the browser retire this
-      // terminal observation from its durable journal.
-      try {
-        for (const candidate of result.goalCandidates) {
-          await acceptGoalReplyNow({
-            conversationId: id,
-            sessionId: result.sessionId!,
-            ...candidate,
-            blocked: superseded || goalFencedChat(id)
-          });
-        }
-      } catch (err) {
-        logWarn(
-          `bridge: Goal reply decision for ${id} is not durable yet — ${err instanceof Error ? err.message : String(err)}`
-        );
-        return json(res, 503, { error: 'goal_reply_not_durable', retryable: true }, origin);
-      }
       if (superseded) {
         endActivity(id);
         repairsInFlight.delete(id);
-        forgetGoalWatch(id);
         compactionWatch.delete(id);
       } else {
         await noteRecoveryObservations(id, result.sessionId, observations, result.activity);
@@ -2327,76 +2095,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   if (route === '/activity') {
     const id = conversationId(url.searchParams.get('conversationId'));
     const since = Number(url.searchParams.get('since') ?? 0);
-    const goalClient = (url.searchParams.get('goalClient') ?? '').slice(0, 100);
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
     noteFiberHealth(id, url.searchParams.get('fiber'));
     const retiredWorker = retiredWorkerForConversation(id);
     const superseded = await conversationWasSuperseded(id);
-    /**
-     * What is driving this chat, which is not a fact about the recorder.
-     *
-     * The switch, the saved task and the draft are all keyed by conversation and durable, so
-     * they are knowable the instant ChatGPT names a chat — well before the recorder has a live
-     * entry for it. Answering that moment with no goal at all is what made a New Chat opened
-     * on a loop report itself as off, with the task the user had just written missing from its
-     * own sheet, until the recorder happened to attach. One view, both branches: a chat is
-     * never told that what is driving it is unknown.
-     */
     const astraSession = await findSessionByConversation(id, { requireUnique: true });
-    const finishOnly = !!astraSession && await astraFinishOnly(astraSession.id, id);
-    const silenceSuppressed = finishOnly || await suppressProSilence(id);
-    const goalView = async () => {
-      const hasKey = await goalKeyPresent(goalModeFor(id));
-      let draft = superseded || silenceSuppressed ? null : goalViewFor(id, goalClient);
-      if (draft && loopAfterTurnFor(id) && astraSession && await chatStillWorking(id, draft.turnId, astraSession.id)) draft = null;
-      let pending = goalPendingReplyFor(id);
-      const sourceTurn = pending?.turnId ?? draft?.turnId;
-      if (sourceTurn && (!astraSession || !await loopReplyHasAuthority(astraSession.id, id, sourceTurn))) {
-        pending = null;
-        draft = null;
-      }
-      const queuePending = !!astraSession && !!await goalInputPriority(id, astraSession.id, pending?.turnId ?? draft?.turnId);
-      if (queuePending) draft = null;
-      const wait = !superseded && !silenceSuppressed && !queuePending && !draft && astraSession && goalActiveFor(id)
-        ? await goalWaitFor(id, astraSession.id) : null;
-      // Authority/history reads yield. Revoked or replaced work must not survive
-      // as an earlier captured ready view in the final native-send authorization.
-      const currentDraft = goalViewFor(id, goalClient);
-      if (draft && (currentDraft?.token !== draft.token || currentDraft.stage !== draft.stage || currentDraft.reply !== draft.reply)) draft = null;
-      const currentPending = goalPendingReplyFor(id);
-      if (pending && (currentPending?.replyId !== pending.replyId || currentPending.turnId !== pending.turnId ||
-          currentPending.acceptedAt !== pending.acceptedAt)) pending = null;
-      return ({
-      enabled: !superseded && !finishOnly && goalEnabledFor(id),
-      configuredEnabled: !superseded && goalEnabledFor(id),
-      afterTurn: loopAfterTurnFor(id),
-      proLoopDelivery: goalEnabledFor(id) && getConfig().ui.finishTool === true && astraSession?.selectedModel?.conversationId === id &&
-        supportsFinishAutomation(goalModeFor(id), astraSession.selectedModel.model, astraSession.selectedModel.reasoningEffort),
-      // Has this chat answered for itself? The page reads the switch and the saved goal as
-      // one state — see goalArmedFor() — and cannot tell an Off somebody chose here from an
-      // Off merely inherited from the app-wide setting without being told which it is.
-      own: superseded || finishOnly || goalFencedChat(id) || goalSwitchFor(id).own,
-      mode: goalModeFor(id),
-      ...goalProgressFor(goalModeFor(id), draft),
-      hasKey,
-      queuePending,
-      wait,
-      // This chat's own goal, and never a worker's: the loop is off there whatever is
-      // stored, and reporting one would let the page offer to drive a chat the prime owns.
-      objective: superseded || goalWorkerChat(id) ? '' : goalObjectiveFor(id),
-      // Why the switch is drawn off when the user did not turn it off. Without this the
-      // menu says "Goal off" in a worker chat and looks like a setting that failed to save.
-      // 'blocked' is the user's own block from the app, which suspends the loop with the
-      // tools — see goalBlockReason.
-      blocked: superseded ? 'continued' : goalBlockReason(id),
-      // Stable, crash-durable reply still owed one Goal decision. A replacement content
-      // script resumes this instead of manufacturing a turn from the rendered transcript.
-      // A blocked chat's owed decision is withheld too, so the page cannot pick it up and
-      // draft into a chat whose tools are refused.
-      pending: superseded || goalFencedChat(id) || silenceSuppressed || queuePending ? null : pending,
-      draft
-    });
-    };
     // Every open ChatGPT tab polls this for its own conversation every few seconds, so
     // this is the app's primary first-hand evidence of which chats exist right now.
     let live = liveConversations().find((entry) => entry.conversationId === id);
@@ -2423,8 +2126,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           nextSince: Number.isFinite(since) ? Math.max(0, since) : 0,
           job: null,
           progress: conversationProgress(id),
-          goal: await goalView(),
-          ...(goalFencedChat(id) || superseded
+          ...(conversationBlockReason(id) || superseded
             ? {
                 // Worker conversations are never Compact & Resume sources. Keep the page's
                 // own auto-compaction switch projection off even when this worker has no live
@@ -2439,10 +2141,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       );
     }
     // Old builds could let the recorder create replacement chat B before the resume ACK moved
-    // A's durable projections. Merely opening/polling B (or a later B→C descendant) must be
-    // enough to heal Goal; requiring another agents MCP call leaves Goal visibly on but inert.
-    // The repair itself requires exact resume provenance and refuses worker-owned targets.
-    if (!goalWorkerChat(id) && !goalObjectiveFor(id)) {
+    // A's durable projections. Polling B is enough to repair the missing workspace/prime state.
+    if (!managedWorkerChat(id)) {
       try {
         await repairPrimeFromResumeShadow(id);
       } catch (err) {
@@ -2458,8 +2158,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const pendingStop = !superseded && summary?.conversationId === id && summary.activeTurnId === live.activeTurnId && stopRequestedFor(id, live.activeTurnId)
       ? commands.find(command => command.spec.type === 'stop' && command.spec.sessionId === live!.sessionId && command.spec.turnId === live!.activeTurnId) : undefined;
     if (!automaticCompactionAllowed(summary)) await cancelAutomaticResumesNow(live.sessionId);
-    // Worker chats and user-blocked chats alike: neither may auto-compact — see goalBlockReason.
-    const workerBlocked = goalFencedChat(id);
+    // Worker chats and user-blocked chats alike: neither may auto-compact.
+    const workerBlocked = conversationBlockReason(id) !== '';
     const requestedSince = Number.isFinite(since) ? Math.max(0, since) : 0;
     // A page reload begins at cursor zero. Never turn that into a full JSONL parse/response:
     // large audited sessions used to freeze the Electron main process here for tens of
@@ -2667,6 +2367,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // run's prime binding, so a worker that compacted would be stranded in B while the
         // broker still authorised A.
         context: contextView(!workerBlocked && !superseded && automaticCompactionAllowed(summary)),
+        blocked: conversationBlockReason(id),
         // This chat was opened by the app, so its first user message is not the user's —
         // it is the handoff brief or the worker bootstrap this app typed. The page uses
         // it to fold that message away. Read off the session record rather than remembered
@@ -2688,10 +2389,6 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // How this chat's own Compact & Resume is going, so the page can say what is
         // happening instead of spinning.
         job: resumeJobFor(live.sessionId),
-        // The goal loop: whether it is on, whether it *can* be on, and whatever draft this
-        // chat currently has in flight. The draft's text grows on this feed, which is what
-        // the panel above the composer streams — there is no second connection to hold open.
-        goal: await goalView(),
         // Local calls still executing for *this chat*. ChatGPT-native compaction waits for
         // this to reach zero after interrupting the turn, so the handoff is written about a
         // settled machine rather than one mid-edit. Recorder-only attribution settling is
@@ -2935,7 +2632,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         origin
       );
     }
-    if (goalWorkerChat(id)) {
+    if (managedWorkerChat(id)) {
       return json(
         res,
         409,
@@ -3146,7 +2843,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (already) {
       const prompt =
         already.state === 'awaiting-summary' && sendUnattempted(already.sourceSend)
-          ? nativeHandoffPrompt(already.token, getConfig().goal.includeToolCalls === true)
+          ? nativeHandoffPrompt(already.token, false)
           : null;
       return json(
         res,
@@ -3185,319 +2882,15 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         token: opened.token,
         sourceSend: opened.sourceSend,
         // The prompt the page injects as the compaction turn. Its answer is the brief.
-        prompt: nativeHandoffPrompt(opened.token, getConfig().goal.includeToolCalls === true),
+        prompt: nativeHandoffPrompt(opened.token, false),
         job: resumeJobFor(sessionId)
       },
       origin
     );
   }
 
-  /**
-   * The goal loop, from the page's side.
-   *
-   *   draft — `{conversationId, turnId}`: ChatGPT finished that generation and the page has
-   *           satisfied itself that it really finished. Start the one draft for it, or hand
-   *           back the one that is already running. The answer is polled off `/activity`.
-   *   ack   — `{conversationId, token}`: the page has typed it, or has given up on typing it.
-   *           Either way the draft is spent and can never be typed again.
-   *
-   * The turn id is the identity, and it is the page's own generation id — not a message id,
-   * not a timestamp. That is what makes a retried POST, a second observer or a reloaded tab
-   * the same draft rather than a second message into somebody's conversation.
-   */
-  if (route === '/goal/draft' && req.method === 'POST') {
-    let body: Record<string, unknown>;
-    try {
-      body = (await readBody(req)) as Record<string, unknown>;
-    } catch (err) {
-      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
-      return goalJson(res, 400, { error: 'bad_request' }, origin);
-    }
-    const id = conversationId(body['conversationId']);
-    const turnId = typeof body['turnId'] === 'string' ? body['turnId'].slice(0, 200) : '';
-    const terminalRequired = body['terminalRequired'] === true;
-    // The page asking is the pickup the owed-reply watchdog is waiting for, whatever the
-    // provider then says. On 2026-09-02 OpenRouter answered ten drafts in a row with 429 and the
-    // page retried every fifteen seconds, alive the whole time; the watchdog only saw a reply
-    // still owed after two minutes and reloaded the chat twice for a page that was never dead.
-    // A reload cannot fix a rate limit, so each request pushes the reload out instead.
-    if (id && body['nativeBusy'] !== true) notePickupActivity(id);
-    const clientId = typeof body['clientId'] === 'string' ? body['clientId'].slice(0, 100) : '';
-    if (!id) return goalJson(res, 400, { error: 'bad_conversation_id' }, origin);
-    if (!turnId) return goalJson(res, 400, { error: 'bad_turn_id' }, origin);
-    const astraSession = await findSessionByConversation(id, { requireUnique: true });
-    if (astraSession && await astraFinishOnly(astraSession.id, id)) return goalJson(res, 409, { error: 'astra_finish_only', retryable: false }, origin);
-    if (turnId.startsWith('g-silence-') && goalPendingReplyFor(id)?.turnId !== turnId) {
-      return goalJson(res, 409, { error: 'goal_reply_not_pending', retryable: false }, origin);
-    }
-    if ((turnId.startsWith('g-silence-') && !await silenceContinuationAllowed(id)) || await suppressProSilence(id)) {
-      return goalJson(res, 409, { error: 'goal_final_not_confirmed', retryable: false }, origin);
-    }
-    if (await conversationWasSuperseded(id)) {
-      return goalJson(res, 409, { error: 'conversation_superseded' }, origin);
-    }
-    if (
-      terminalRequired &&
-      goalPendingReplyFor(id)?.turnId !== turnId &&
-      goalViewFor(id, clientId)?.turnId !== turnId
-    ) {
-      return goalJson(res, 409, { error: 'goal_reply_not_pending', retryable: true }, origin);
-    }
-    // Checked here as well as in the page, because the page's copy of the setting is a poll
-    // old and this is the request that spends somebody's OpenRouter credit.
-    if (!goalActiveFor(id)) return goalJson(res, 409, { error: 'goal_disabled' }, origin);
-    if (!(await goalKeyPresent(goalModeFor(id)))) return goalJson(res, 409, { error: 'no_api_key' }, origin);
-    const live = liveConversations().find((entry) => entry.conversationId === id);
-    const known = live ? null : await findSessionByConversation(id, { requireUnique: true });
-    const sessionId = live?.sessionId ?? known?.id ?? null;
-    if (!sessionId) {
-      return json(
-        res,
-        409,
-        { error: 'session_not_recorded', message: 'This chat has no recorded local session to continue from.' },
-        origin
-      );
-    }
-    if (await goalInputPriority(id, sessionId, turnId))
-      return goalJson(res, 409, { error: 'user_input_pending', retryable: true }, origin);
-    if (body['nativeBusy'] === true) {
-      const pro = await extendedSilenceWindowFor(id, sessionId);
-      const pending = goalPendingReplyFor(id);
-      const final = await readCompletedFinal(sessionId, id, turnId);
-      const current = () => goalPendingReplyFor(id)?.replyId === pending?.replyId &&
-        goalPendingReplyFor(id)?.acceptedAt === pending?.acceptedAt && goalActiveFor(id) &&
-        !isChatBlocked(id) && !stopRequestedFor(id) && runningToolCalls(id) === 0 && !continuationForSession(sessionId);
-      if (!pending || pending.turnId !== turnId || !final || !await loopReplyHasAuthority(sessionId, id, turnId) || !current())
-        return goalJson(res, 409, { error: 'goal_final_not_confirmed', retryable: false }, origin);
-      if (!pending.listenUntil) {
-        await deferSilenceGoalReplyNow(id, turnId, Date.now() + recoveryBusyMs(pro));
-        changed();
-      }
-      const stop = current() && await claimGoalRecoveryStopNow(id, pending.replyId, pending.acceptedAt) &&
-        !!await readCompletedFinal(sessionId, id, turnId) && current();
-      return goalJson(res, 200, { recovery: { stop, listenUntil: goalPendingReplyFor(id)?.listenUntil } }, origin);
-    }
-    if (await chatStillWorking(id, turnId, sessionId)) {
-      // An unfinished turn belongs to Continue. Only canonical completion files
-      // an automatic Goal/Loop obligation; a page request cannot invent one.
-      return json(
-        res,
-        409,
-        { error: 'chat_still_working', retryable: true, message: 'This chat is still working on its answer; the app will draft once it has finished.' },
-        origin
-      );
-    }
-    let draft;
-    try {
-      // Reserve the browser owner synchronously, but do not let provider work begin until the
-      // matching obligation below is crash-durable. This preserves the existing duplicate-tab
-      // fence without leaving a failure window between OpenRouter and the state file.
-      draft = startGoalDraft({
-        sessionId,
-        conversationId: id,
-        turnId,
-        clientId,
-        deferStart: true
-      });
-    } catch (err) {
-      if (err instanceof Error && err.message === 'goal_owned_elsewhere') {
-        return json(
-          res,
-          409,
-          {
-            error: 'goal_owned_elsewhere',
-            message: 'Another tab is already handling Goal Mode for this chat.'
-          },
-          origin
-        );
-      }
-      throw err;
-    }
-    // The page has crossed the semantic boundary: this exact completed ChatGPT turn is owed
-    // one Goal decision. Its local id is provisional until the recorder delivers the stable
-    // assistant id; a 429, app restart or page reload may discard an attempt, never this row.
-    try {
-      await acceptGoalReplyNow({
-        conversationId: id,
-        sessionId,
-        replyId: `turn:${turnId}`.slice(0, 200),
-        turnId,
-        eventSeq: 0,
-        blocked: false
-      });
-    } catch (err) {
-      discardPreparedGoalDraft(id, draft.token);
-      logWarn(`bridge: Goal turn ${turnId} for ${id} is not durable yet — ${err instanceof Error ? err.message : String(err)}`);
-      return goalJson(res, 503, { error: 'goal_reply_not_durable', retryable: true }, origin);
-    }
-    if (await goalInputPriority(id, sessionId, turnId)) {
-      discardPreparedGoalDraft(id, draft.token);
-      return goalJson(res, 409, { error: 'user_input_pending', retryable: true }, origin);
-    }
-    const pendingBeforeAuthority = goalPendingReplyFor(id);
-    if (pendingBeforeAuthority && pendingBeforeAuthority.turnId !== turnId) {
-      discardPreparedGoalDraft(id, draft.token);
-      return goalJson(res, 409, { error: 'goal_reply_not_pending', retryable: false }, origin);
-    }
-    const hasAuthority = await loopReplyHasAuthority(sessionId, id, turnId);
-    const pendingAfterAuthority = goalPendingReplyFor(id);
-    if (pendingAfterAuthority?.turnId !== pendingBeforeAuthority?.turnId ||
-        pendingAfterAuthority?.replyId !== pendingBeforeAuthority?.replyId ||
-        pendingAfterAuthority?.acceptedAt !== pendingBeforeAuthority?.acceptedAt) {
-      discardPreparedGoalDraft(id, draft.token);
-      return goalJson(res, 409, { error: 'goal_reply_not_pending', retryable: false }, origin);
-    }
-    // A no-MCP automatic row is deliberately handled, so absence alone must not
-    // replace its useful refusal with the generic pending-reply error.
-    if (!hasAuthority) {
-      discardPreparedGoalDraft(id, draft.token);
-      return goalJson(res, 409, { error: 'loop_mcp_call_missing', retryable: false }, origin);
-    }
-    if (pendingAfterAuthority?.turnId !== turnId) {
-      discardPreparedGoalDraft(id, draft.token);
-      return goalJson(res, 409, { error: 'goal_reply_not_pending', retryable: false }, origin);
-    }
-    beginGoalDraft(id, draft.token);
-    return goalJson(res, 200, { goal: draft, sessionId }, origin);
-  }
-
-  if (route === '/goal/ack' && req.method === 'POST') {
-    let body: Record<string, unknown>;
-    try {
-      body = (await readBody(req)) as Record<string, unknown>;
-    } catch (err) {
-      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
-      return goalJson(res, 400, { error: 'bad_request' }, origin);
-    }
-    const id = conversationId(body['conversationId']);
-    if (!id) return goalJson(res, 400, { error: 'bad_conversation_id' }, origin);
-    const token = typeof body['token'] === 'string' ? body['token'] : '';
-    const clientId = typeof body['clientId'] === 'string' ? body['clientId'].slice(0, 100) : '';
-    try {
-      if (body['nativeBusy'] === true) {
-        const draft = goalViewFor(id, clientId);
-        if (!draft || draft.token !== token || draft.stage !== 'ready') return goalJson(res, 200, { acknowledged: false, deferred: false }, origin);
-        const session = await findSessionByConversation(id, { requireUnique: true });
-        const selection = session?.selectedModel;
-        const pro = (selection?.conversationId === id && isProModel(selection.model, selection.reasoningEffort)) || await extendedSilenceWindowFor(id);
-        const deferred = await deferSilenceGoalReplyNow(id, draft.turnId, Date.now() + recoveryBusyMs(pro), { token, clientId });
-        return goalJson(res, 200, { acknowledged: false, deferred,
-          ...(deferred ? { listenUntil: goalPendingReplyFor(id)?.listenUntil } : {}) }, origin);
-      }
-      return goalJson(res, 200, { acknowledged: await ackGoalDraftNow(id, token, clientId) }, origin);
-    } catch (err) {
-      logWarn(`bridge: Goal acknowledgement for ${id} is not durable yet — ${err instanceof Error ? err.message : String(err)}`);
-      return goalJson(res, 503, { error: 'goal_ack_not_durable', retryable: true }, origin);
-    }
-  }
-
-  /**
-   * The specific goal one chat is being driven towards.
-   *
-   * Set from the composer's settings sheet and persisted per conversation. Empty text clears
-   * it. Reaching the goal stops that run but intentionally leaves the objective in place until
-   * the user clears/replaces it, so reopening the chat still shows the finish line.
-   *
-   * Whatever is in flight for this chat is retired on the way through, because a draft is
-   * frozen with the goal it was started under: without this, saving a new goal would still
-   * type the old one's message into the chat one last time.
-   *
-   * A goal may name its own mode, and when it does that naming is authoritative for this
-   * chat. The reason is a run that was lost: a goal written from the New Chat sheet starts
-   * the chat immediately, but the mode it ran in was still read from the standing switch —
-   * off, therefore Goal — so a two-hour unattended run ended at the second turn on one
-   * "looks done" from the gate. The intent lives in the control the user pressed, so the
-   * mode is pinned as this chat's own switch here, in the same request, before the goal
-   * exists to be acted on. Clearing the goal turns that switch back off: the two were
-   * written together and a bare mode left switched on would keep prompting a chat whose
-   * finish line the user has just deleted.
-   */
-  if (route === '/goal/objective' && req.method === 'POST') {
-    let body: Record<string, unknown>;
-    try {
-      body = (await readBody(req)) as Record<string, unknown>;
-    } catch (err) {
-      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
-      return goalJson(res, 400, { error: 'bad_request' }, origin);
-    }
-    const id = conversationId(body['conversationId']);
-    if (!id) return goalJson(res, 400, { error: 'bad_conversation_id' }, origin);
-    const text = typeof body['text'] === 'string' ? body['text'] : '';
-    const named = body['mode'] === 'goal' || body['mode'] === 'loop' ? body['mode'] : null;
-    try { return goalJson(res, 200, await saveConversationObjective(id, text, named), origin); }
-    catch (error) {
-      const reason = error instanceof Error ? error.message : 'goal_objective_not_durable';
-      const refused = ['goal_worker_chat', 'conversation_superseded', 'chat_blocked'].includes(reason);
-      return goalJson(res, refused ? 409 : 503, { error: reason, ...(!refused ? { retryable: true } : {}) }, origin);
-    }
-  }
-
-  /**
-   * The opening message for a chat that has no id yet.
-   *
-   * Everything else here is keyed by conversation, and a New Chat has none — ChatGPT assigns
-   * one only when a message is sent, and the message being asked for is that one. So this
-   * route holds nothing, streams nothing and is answered in place: the page waits for it,
-   * types it, and comes back to /goal/objective with the real id once ChatGPT has issued it.
-   *
-   * The mode comes with it for the same reason it cannot be stored: there is no conversation
-   * to hold a switch, so the choice the user made in the sheet is the only thing that knows
-   * which instruction this opening is being written under.
-   */
-  if (route === '/goal/open' && req.method === 'POST') {
-    let body: Record<string, unknown>;
-    try {
-      body = (await readBody(req)) as Record<string, unknown>;
-    } catch (err) {
-      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
-      return goalJson(res, 400, { error: 'bad_request' }, origin);
-    }
-    const text = typeof body['text'] === 'string' ? body['text'] : '';
-    if (!text.trim()) return goalJson(res, 400, { error: 'no_objective' }, origin);
-    const opening =
-      body['mode'] === 'goal' || body['mode'] === 'loop' ? (body['mode'] as 'goal' | 'loop') : null;
-    if (!(await goalKeyPresent(opening ?? goalModeFor()))) return goalJson(res, 409, { error: 'no_api_key' }, origin);
-    const drafted = await draftOpeningMessage(text, opening);
-    if ('error' in drafted) return goalJson(res, 502, drafted, origin);
-    return goalJson(res, 200, drafted, origin);
-  }
-
-  /**
-   * The two switches the composer's settings menu owns.
-   *
-   * Deliberately these two and nothing else. Everything else in this app's settings decides
-   * what ChatGPT may reach on this machine, and a route the page can post to must never be
-   * able to widen that; these are the two that only decide what the app does with a chat
-   * that is already recorded.
-   */
-  /**
-   * The same two settings, read rather than written.
-   *
-   * `/activity` carries them on every poll, but it is addressed by conversation and a New
-   * Chat has none — and a New Chat is now somewhere a goal can be written, so the sheet
-   * above that composer has to be able to say what the settings are. Nothing here is
-   * conversation-scoped, so nothing here can be: no objective, no block, no draft.
-   */
   if (route === '/settings' && req.method === 'GET') {
-    return json(
-      res,
-      200,
-      {
-        context: contextView(),
-        goal: {
-          enabled: getConfig().goal.enabled,
-          // The app-wide setting is nobody's own answer, by definition: it is what a chat that
-          // has never said anything inherits.
-          own: false,
-          mode: goalModeFor(),
-          ...goalProgressFor(goalModeFor()),
-          hasKey: await goalKeyPresent(),
-          objective: '',
-          blocked: ''
-        }
-      },
-      origin
-    );
+    return json(res, 200, { context: contextView() }, origin);
   }
 
   if (route === '/settings' && req.method === 'POST') {
@@ -3509,151 +2902,25 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       return json(res, 400, { error: 'bad_request' }, origin);
     }
     const auto = typeof body['autoCompact'] === 'boolean' ? (body['autoCompact'] as boolean) : null;
-    const goal = typeof body['goal'] === 'boolean' ? (body['goal'] as boolean) : null;
-    const loop = typeof body['loop'] === 'boolean' ? (body['loop'] as boolean) : null;
     const settingsConversation = conversationId(body['conversationId']);
-    if (typeof body['loopAfterTurn'] === 'boolean') {
-      if (!settingsConversation || auto !== null || goal !== null || loop !== null) return json(res, 400, { error: 'bad_loop_delivery' }, origin);
-      const session = await findSessionByConversation(settingsConversation, { requireUnique: true });
-      if (!session) return json(res, 409, { error: 'session_not_recorded' }, origin);
-      const control = goalSwitchFor(settingsConversation);
-      await setSessionAutomation(session.id, control.enabled ? control.mode : 'off', body['loopAfterTurn']);
-      return json(res, 200, { goal: { afterTurn: goalSwitchFor(settingsConversation).afterTurn } }, origin);
-    }
-    // One switch per request. Goal and Loop are one setting drawn as two controls, so a body
-    // carrying both is a page describing a state that does not exist rather than a change.
-    if (goal !== null && loop !== null) return json(res, 400, { error: 'goal_and_loop_exclusive' }, origin);
-    if (auto === null && goal === null && loop === null) {
-      return json(res, 400, { error: 'nothing_to_change' }, origin);
-    }
-    if (
-      settingsConversation &&
-      (auto === true || goal === true || loop === true) &&
-      (await conversationWasSuperseded(settingsConversation))
-    ) {
+    if (auto === null) return json(res, 400, { error: 'nothing_to_change' }, origin);
+    if (settingsConversation && auto === true && await conversationWasSuperseded(settingsConversation))
       return json(res, 409, { error: 'conversation_superseded' }, origin);
-    }
-    // Turning anything *on* from a blocked chat's composer is refused; turning it off is
-    // still the user's to do. The block itself is lifted in the app, not here.
-    if (
-      settingsConversation &&
-      (auto === true || goal === true || loop === true) &&
-      isChatBlocked(settingsConversation)
-    ) {
-      return json(
-        res,
-        409,
-        {
-          error: 'chat_blocked',
-          message: 'This chat is blocked in the app. Release it there before turning Goal, Loop or auto-compaction on.'
-        },
-        origin
-      );
-    }
-    if (auto !== null && settingsConversation && goalWorkerChat(settingsConversation)) {
-      return json(
-        res,
-        409,
-        {
-          error: 'worker_compaction_disabled',
-          message: 'Worker chats never auto-compact and cannot change Compact & Resume from their composer.'
-        },
-        origin
-      );
-    }
-    const which = goal !== null ? 'goal' : loop !== null ? 'loop' : null;
-    // Which switch this request is actually turning. A composer always knows its own chat, so
-    // a switch it sends is that chat's: the sheet is drawn beside one conversation and the
-    // person flipping it is answering about that conversation, not about every chat they have
-    // ever opened. Only a New Chat — no id yet, nothing to store an override against — still
-    // moves the app-wide setting, which is exactly where it should be set: it is the default
-    // every chat with no answer of its own inherits.
-    const scoped = which !== null && settingsConversation !== null;
-    // Read inside the queued update rather than before it, so a settings change racing this
-    // one cannot leave the comparison below looking at a config neither request ever wrote.
-    let driving: 'goal' | 'loop' | null = null;
-    const before = scoped
-      ? (() => {
-          const held = goalSwitchFor(settingsConversation as string);
-          return held.enabled ? held.mode : null;
-        })()
-      : null;
-    const next = await updateConfig((config) => {
-      driving = config.goal.enabled ? config.goal.mode : null;
-      return {
-        ...config,
-        compaction: auto === null ? config.compaction : { ...config.compaction, auto },
-        goal: scoped ? config.goal : applyGoalSwitch(config.goal, which, goal ?? loop)
-      };
-    });
-    const chatSwitch = scoped
-      ? await setGoalSwitchNow(settingsConversation as string, which as 'goal' | 'loop', (goal ?? loop) as boolean)
-      : null;
-    if (auto === false) {
-      try {
-        await cancelAutomaticResumesNow();
-      } catch (err) {
-        logWarn(`bridge: Auto Off could not durably cancel its compaction ticket(s) — ${err instanceof Error ? err.message : String(err)}`);
+    if (settingsConversation && auto === true && isChatBlocked(settingsConversation))
+      return json(res, 409, { error: 'chat_blocked', message: 'This chat is blocked in the app. Release it there before turning auto-compaction on.' }, origin);
+    if (settingsConversation && managedWorkerChat(settingsConversation))
+      return json(res, 409, { error: 'worker_compaction_disabled', message: 'Worker chats never auto-compact.' }, origin);
+    const next = await updateConfig(config => ({ ...config, compaction: { ...config.compaction, auto } }));
+    if (!auto) {
+      try { await cancelAutomaticResumesNow(); }
+      catch (err) {
+        logWarn(`bridge: Auto Off could not durably cancel its compaction ticket(s) ? ${err instanceof Error ? err.message : String(err)}`);
         return json(res, 503, { error: 'auto_compaction_cancel_not_durable', retryable: true }, origin);
       }
     }
-    // Every change that takes authority away from work already in flight, not only switching
-    // off: a draft started as a gate must not be typed after the user asked for a loop, and a
-    // loop draft must not be typed after the user asked for a gate. Both are the same fact —
-    // the instruction this request was made under is no longer the one in force. A chat-scoped
-    // change retires that chat's draft and nobody else's, because nobody else's instruction moved.
-    if (chatSwitch) {
-      // `chatSwitch.mode === which` also covers retrying the same POST after the ticket write
-      // failed but the separate switch file landed. The second request must repair the ticket
-      // instead of deciding there is no transition left to perform.
-      if (before !== (chatSwitch.enabled ? chatSwitch.mode : null) || chatSwitch.mode === which) {
-        const chatId = settingsConversation as string;
-        try {
-          // The switch and the ticket are one user decision. Off durably closes the pickup;
-          // On (including Goal <-> Loop) re-arms the latest stable final under the new mode.
-          await activateConversationGoalReply(
-            chatId,
-            chatSwitch.enabled && getConfig().sessions.record && (await goalKeyPresent(chatSwitch.mode))
-          );
-          forgetGoalWatch(chatId);
-        } catch (err) {
-          logWarn(`bridge: Goal ticket for ${chatId} did not follow its switch — ${err instanceof Error ? err.message : String(err)}`);
-          return json(res, 503, { error: 'goal_ticket_not_durable', retryable: true }, origin);
-        }
-      }
-    } else if (driving !== (next.goal.enabled ? next.goal.mode : null)) {
-      retireGoalDrafts(!next.goal.enabled);
-    }
-    // The app's own settings screen is showing these two switches as well.
     changed();
-    logInfo(
-      `bridge: browser set ${[
-        auto === null ? '' : `automatic compaction ${auto ? 'on' : 'off'}`,
-        goal === null ? '' : `Goal ${goal ? 'on' : 'off'}`,
-        loop === null ? '' : `Loop ${loop ? 'on' : 'off'}`
-      ]
-        .filter(Boolean)
-        .join(' and ')}${scoped ? ` for chat ${settingsConversation}` : ''}`
-    );
-    return json(
-      res,
-      200,
-      {
-        context: contextView(),
-        goal: {
-          // What this chat's switch now says, which is the only answer its composer can draw.
-          enabled: chatSwitch ? chatSwitch.enabled : next.goal.enabled,
-          // A chat-scoped write is this chat answering for itself, and the sheet must draw that
-          // on the same frame — the next poll is a second away and the Off it just chose would
-          // read as an inherited one until then.
-          own: chatSwitch !== null,
-          mode: chatSwitch ? chatSwitch.mode : next.goal.mode,
-          ...goalProgressFor(chatSwitch ? chatSwitch.mode : next.goal.mode),
-          hasKey: await goalKeyPresent(chatSwitch ? chatSwitch.mode : next.goal.mode)
-        }
-      },
-      origin
-    );
+    logInfo(`bridge: browser set automatic compaction ${auto ? 'on' : 'off'}`);
+    return json(res, 200, { context: contextView(next.compaction.auto) }, origin);
   }
 
   // Browser-restart recovery keeps only inert command ids in extension storage. Before the
@@ -4334,13 +3601,13 @@ export async function sweepStaleSwarm(now = Date.now()): Promise<boolean> {
     }
   }
   const silent = await inspectSilentChats(now);
-  // An unfinished source files Continue; only a canonical final files Goal/Loop.
+  // An unfinished source files Continue; queued input and compaction use their own durable owners.
   await fileSilenceTickets(silent.spent, now);
   // All undelivered tickets share this pass, including Continue filed by the silence pass.
-  const goalsQueued = await inspectOwedPickups(now);
+  const pickupsQueued = await inspectOwedPickups(now);
   const compactionsQueued = await inspectOwedCompactions(now);
 
-  const silenceChanged = silent.queued || silent.spent.length > 0 || goalsQueued || compactionsQueued;
+  const silenceChanged = silent.queued || silent.spent.length > 0 || pickupsQueued || compactionsQueued;
   finishSilentChats(silent.spent);
   return silenceChanged || brokerChanged;
 }
@@ -5591,18 +4858,18 @@ function grantActivity(conversationId: string, sessionId: string, at = Date.now(
 const compactionFilings = new Set<string>();
 
 /**
- * When each chat's last local tool call was attributed to it, and the quiet a Goal draft needs.
+ * When each chat's last local tool call was attributed to it, and the quiet recovery needs.
  *
  * The page's word that a turn ended is not enough to write the next message on: a reloaded
  * page reads the transcript's last `end_turn` bit as a finished answer while the same request
  * is still calling tools, and "Message delivery timed out" closes the local turn the same way.
- * On 2026-09-03 the loop drafted twenty seconds after such an end, with the chat's last tool
- * call twenty-eight seconds old, and sent — and the chat then had two requests running in it.
- * So the app applies the facts only it has, and the draft waits on both. The recorder's own
+ * On 2026-09-03 an automatic follow-up fired twenty seconds after such an end, with the chat's
+ * last tool call twenty-eight seconds old, and the chat then had two requests running in it.
+ * So the app applies the facts only it has. The recorder's own
  * turn: a turn it reopened stays open until the page reports a real end, and on 2026-09-03 the
- * page never did — its "Message delivery timed out" banner produced no turn end at all, yet the
- * page asked for the draft twenty seconds later and got it. Recent tools keep the draft waiting
- * unless the durable canonical final for that exact turn supersedes them. A bare turn_end
+ * page never did — its "Message delivery timed out" banner produced no turn end at all. Recent
+ * tools keep recovery waiting unless the durable canonical final for that exact turn supersedes
+ * them. A bare turn_end
  * cannot do that, and active work always wins. The obligation is
  * filed either way; a call that proves the turn is still running withdraws it (see
  * noteCallAttribution), and a turn that really has ended is drafted a minute later at most.
@@ -5614,7 +4881,7 @@ const compactionFilings = new Set<string>();
  * would have closed it is the page that broke.
  */
 const lastAttributedCallAt = new Map<string, number>();
-export const GOAL_QUIET_MS = 60_000;
+export const PICKUP_QUIET_MS = 60_000;
 export const PRO_SILENCE_MS = 10 * 60_000;
 export const PRO_ACTIVITY_MS = 10 * 60_000;
 
@@ -5661,109 +4928,6 @@ async function extendedSilenceWindowFor(conversationId: string, sessionId?: stri
   return Boolean(grant && (!sessionId || grant.sessionId === sessionId) && grant.model === 'pro');
 }
 
-/** Silence requires this exact turn's recorded MCP work and eligible model/Loop policy. */
-async function silenceContinuationAllowed(conversationId: string, sessionId?: string): Promise<boolean> {
-  const session = sessionId ? await getSession(sessionId) : await findSessionByConversation(conversationId, { requireUnique: true });
-  if (!session || session.conversationId !== conversationId) return false;
-  const grant = activeUntil.get(conversationId);
-  const pending = goalPendingReplyFor(conversationId);
-  // Historical automatic silence decisions are replaced by the shared Continue
-  // outbox. Only a deliberate activation can still collect a retained Off source.
-  if (pending && !pending.explicitActivation) return false;
-  if (pending?.silencePro && !loopAfterTurnFor(conversationId)) return false;
-  const sourceTurnId = pending ? pending.silenceSourceTurnId :
-    grant?.sessionId === session.id && (grant.model !== 'pro' || loopAfterTurnFor(conversationId)) ? grant.turnId : null;
-  if (!sourceTurnId) return false;
-  const starts = await readRecentEvents(session.id, 1, { kinds: ['turn_start'] });
-  const start = starts[0];
-  if (!start || start.turnId !== sourceTurnId) return false;
-  if (!await turnHasMcpCall(session.id, conversationId, sourceTurnId)) return false;
-  if (pending && loopAfterTurnFor(conversationId)) {
-    const work = await readRecentEvents(session.id, 1, { kinds: ['user_message', 'assistant_message', 'tool_call', 'page_tool', 'turn_start'] });
-    // A refresh can discover an older interim for the first time, or replace its
-    // HTML/identity under a newer storage sequence. Neither is newly authored work.
-    // The recorder's accepted activity renews the grant below for real revisions.
-    if (work.some(event => event.time > pending.acceptedAt)) return false;
-    // A failed-view grant dates the error observation, not new authored work.
-    // Learning that failure after the confirmed reload must retain its Pro ticket.
-    if (grant?.turnId === sourceTurnId && !grant.thinkingFailed && grant.evidenceAt > pending.acceptedAt) return false;
-  }
-  return !pending || goalPendingReplyFor(conversationId)?.replyId === pending.replyId;
-}
-
-/** Withdraw obsolete synthetic obligations through the Goal owner, including any running draft. */
-async function suppressProSilence(conversationId: string): Promise<boolean> {
-  const pending = goalPendingReplyFor(conversationId);
-  const draft = goalViewFor(conversationId);
-  if (!(pending?.turnId.startsWith('g-silence-') || pending?.replyId.startsWith('silence:') ||
-      draft?.turnId.startsWith('g-silence-'))) return false;
-  if (await silenceContinuationAllowed(conversationId)) return false;
-  // Do not retire a real final that replaced the synthetic obligation during the disk read.
-  const latest = goalPendingReplyFor(conversationId);
-  const currentDraft = goalViewFor(conversationId);
-  if (latest?.replyId !== pending?.replyId || currentDraft?.token !== draft?.token) return false;
-  if (latest) await withdrawSilenceGoalReplyNow(conversationId, latest.replyId);
-  else await setGoalReplyActiveNow(conversationId, false);
-  return true;
-}
-
-async function revokeSilenceLoop(conversationId: string): Promise<void> {
-  const pending = goalPendingReplyFor(conversationId);
-  if (pending?.silenceSourceTurnId) await withdrawSilenceGoalReplyNow(conversationId, pending.replyId);
-}
-
-/** Outbox order and source consumption apply to every model and every Goal pickup. */
-async function goalInputPriority(conversationId: string, sessionId: string, turnId?: string): Promise<'queued' | 'consumed' | null> {
-  const pending = goalPendingReplyFor(conversationId);
-  const original = pending && pending.turnId === turnId ? pending.silenceSourceTurnId ?? turnId : turnId;
-  const source = original ? await goalReplySourceTurn(sessionId, original) : undefined;
-  const priority = await inputBeforeGoal(sessionId, source);
-  if (priority === 'consumed' && source) await consumeGoalReplyForInputNow(conversationId, sessionId, source);
-  return priority;
-}
-
-/** Both UIs describe the same existing reply and work deadlines, without another clock owner. */
-async function goalWaitFor(conversationId: string, sessionId: string, now = Date.now()): Promise<import('../shared/goal.js').GoalWait | null> {
-  const pending = goalPendingReplyFor(conversationId);
-  if (!pending) {
-    const countdowns = await sessionRecoveryCountdowns(sessionId, conversationId);
-    const visible = countdowns.find(row => row.kind === 'silence' && (row.visibleAt ?? 0) <= now && row.deadline > now);
-    return visible ? { reason: 'silence', until: visible.deadline } : null;
-  }
-  if (runningToolCalls(conversationId) > 0) return { reason: 'tools' };
-  if ((pending.listenUntil ?? 0) > now) return { reason: pending.silenceSourceTurnId ? 'listening' : 'native-busy', until: pending.listenUntil };
-  const grant = activeUntil.get(conversationId);
-  if (grant?.sessionId === sessionId && grant.mcpBacked && !grant.thinkingFailed && grant.until > now)
-    return { reason: 'quiet', until: grant.until };
-  return { reason: 'settling' };
-}
-
-async function chatStillWorking(conversationId: string, turnId: string, sessionId: string, now = Date.now()): Promise<boolean> {
-  if (runningToolCalls(conversationId) > 0) return true;
-  const workGrant = activeUntil.get(conversationId);
-  if (workGrant?.sessionId === sessionId && workGrant.mcpBacked && !workGrant.thinkingFailed && workGrant.until > now) return true;
-  if (!turnId.startsWith('g-silence-') && chatIsWorking(conversationId)) return true;
-  const last = lastAttributedCallAt.get(conversationId);
-  const pro = await extendedSilenceWindowFor(conversationId, sessionId);
-  const pending = goalPendingReplyFor(conversationId);
-  if (pending?.turnId === turnId && (pending.listenUntil ?? 0) > now) return true;
-  if (pending?.turnId === turnId && pending.replyId.startsWith('activation:')) {
-    const [end] = await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end', 'user_message'] });
-    // Explicit reactivation owes a decision after the exact failed/stopped answer.
-    // New questions, reopened work and in-flight tools still veto delivery.
-    return end?.kind !== 'turn_end' || end.turnId !== turnId || end.seq !== pending.eventSeq ||
-      !(end.outcome === 'stopped' || (end.outcome === 'failed' && end.reason === 'thinking_failed')) ||
-      (last !== undefined && last > end.time) || runningToolCalls(conversationId) > 0 ||
-      chatIsWorking(conversationId) || goalPendingReplyFor(conversationId)?.acceptedAt !== pending.acceptedAt;
-  }
-  if (pro && turnId.startsWith('g-silence-') && !loopAfterTurnFor(conversationId)) return true;
-  if (turnId.startsWith('g-silence-') && await silenceContinuationAllowed(conversationId, sessionId)) return false;
-  if (!await readCompletedFinal(sessionId, conversationId, turnId)) return true;
-  // Evidence may have changed while the durable tail was read.
-  return runningToolCalls(conversationId) > 0 || chatIsWorking(conversationId) ||
-    lastAttributedCallAt.get(conversationId) !== last;
-}
-
 /**
  * Files the automatic Compact & Resume ticket for a working chat that has crossed the line.
  *
@@ -5775,7 +4939,7 @@ async function chatStillWorking(conversationId: string, turnId: string, sessionI
  * (`maybeResumePendingCompaction`), and if no page does, the pickup schedule raises one.
  *
  * Still a level plus liveness, exactly as before: an idle chat over the line is never touched
- * (page activity or its current MCP grant), a worker or blocked chat never (`goalFencedChat`), and a session already
+ * (page activity or its current MCP grant), a worker or blocked chat never, and a session already
  * carrying a continuation is not given a second.
  */
 /** An exact failed current turn can earn compaction; a historical banner cannot. */
@@ -5793,7 +4957,7 @@ async function failedCompactionTurnCurrent(conversationId: string, sessionId: st
 
 async function considerAutomaticCompaction(conversationId: string, sessionId: string, failedTurn?: string): Promise<void> {
   if (!getConfig().compaction.auto || compactionFilings.has(conversationId)) return;
-  if (goalFencedChat(conversationId) || continuationForSession(sessionId) || stopRequestedFor(conversationId)) return;
+  if (conversationBlockReason(conversationId) !== '' || continuationForSession(sessionId) || stopRequestedFor(conversationId)) return;
   // Exact tool attribution already owns this grant and consumes it on final/Stop.
   // Re-read it after storage awaits, rather than carrying a stale boolean or
   // maintaining a second blind-page clock beside the existing activity owner.
@@ -5814,7 +4978,7 @@ async function considerAutomaticCompaction(conversationId: string, sessionId: st
     const current = await getSession(sessionId);
     if (!current || current.conversationId !== conversationId || current.browserRecoveryDismissedAt !== undefined || !autoCompactionReady(current)) return;
     if (failedTurn && !await failedCompactionTurnCurrent(conversationId, sessionId, failedTurn)) return;
-    if ((!failedTurn && !hasCurrentWork()) || continuationForSession(sessionId) || goalFencedChat(conversationId) ||
+    if ((!failedTurn && !hasCurrentWork()) || continuationForSession(sessionId) || conversationBlockReason(conversationId) !== '' ||
         stopRequestedFor(conversationId) || !getConfig().compaction.auto || !automaticCompactionAllowed(current)) return;
     const opened = await openContinuationNow(sessionId, conversationId, true);
     rememberToken(sessionId, opened.token);
@@ -5829,60 +4993,9 @@ async function considerAutomaticCompaction(conversationId: string, sessionId: st
   }
 }
 
-/** File the shared outbox ticket, retaining only handled Off sources for explicit activation. */
+/** File the shared outbox ticket for a confirmed silent turn. */
 async function fileSilenceTickets(spent: readonly string[], now: number): Promise<void> {
-  for (const conversationId of spent) {
-    // An existing user instruction takes this boundary before a synthesized Goal reply.
-    if (await fileSilenceInputTicket(conversationId, now)) continue;
-    // Unfinished automatic work belongs to Continue, never a Goal decision. Keep
-    // only the historical Off source below for deliberate user reactivation.
-    if (goalActiveFor(conversationId)) continue;
-    if (goalWorkerChat(conversationId) || isChatBlocked(conversationId)) continue;
-    // Only after a silence reload that was carried out and answered by nothing. A grant spent
-    // for any other reason — not a chat the user wants brought back, say — earned no reload
-    // and gets no ticket.
-    const held = repairsInFlight.get(conversationId);
-    if (held?.reason !== 'silence' || held.state !== 'done') continue;
-    const grant = activeUntil.get(conversationId);
-    const session = await getSession(held.sessionId);
-    if (!session || session.conversationId !== conversationId) continue;
-    if (await inputBeforeGoal(session.id, grant?.turnId ?? undefined)) continue;
-    const [start] = await readRecentEvents(session.id, 1, { kinds: ['turn_start'] });
-    if (!grant?.turnId || start?.turnId !== grant.turnId || goalActiveFor(conversationId)) continue;
-    if (!grant || activeUntil.get(conversationId) !== grant ||
-        (grant.model === 'pro' && !grant.thinkingFailed && now - grant.evidenceAt < PRO_SILENCE_MS)) continue;
-    if (goalPendingReplyFor(conversationId) || runningToolCalls(conversationId) > 0) continue;
-    if (continuationForSession(session.id)) continue;
-    // Canonical message replacement leaves sequence gaps; the summary count is not a cursor.
-    const [boundary] = await readRecentEvents(session.id, 1);
-    if (!boundary) continue;
-    // ACK and listening expiry are the same repair, even while Goal is Off.
-    // New work may reuse this source turn, but earns a different repair token.
-    const turnId = `g-silence-${held.token}`;
-    try {
-      await acceptGoalReplyNow({
-        conversationId,
-        sessionId: session.id,
-        silenceSourceTurnId: grant.turnId ?? undefined,
-        silencePro: grant.model === 'pro',
-        ...(grant.thinkingFailed || grant.model !== 'pro' ? { listenUntil: grant.until } : {}),
-        replyId: `silence:${held.token}`,
-        turnId,
-        eventSeq: boundary.seq,
-        blocked: false,
-        handledOnly: true,
-        current: () => activeUntil.get(conversationId) === grant && repairsInFlight.get(conversationId) === held &&
-          runningToolCalls(conversationId) === 0 && !stopRequestedFor(conversationId) && !goalActiveFor(conversationId)
-      });
-      if (activeUntil.get(conversationId) !== grant || runningToolCalls(conversationId) > 0) {
-        const pending = goalPendingReplyFor(conversationId);
-        if (pending?.turnId === turnId) await withdrawSilenceGoalReplyNow(conversationId, pending.replyId);
-      }
-      logInfo(`bridge: ${conversationId} stayed silent after its reload — retaining the handled source for explicit activation`);
-    } catch (err) {
-      logWarn(`bridge: could not file the Goal ticket for ${conversationId} — ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+  for (const conversationId of spent) await fileSilenceInputTicket(conversationId, now);
 }
 
 /** Reuse silence's exact work grant and confirmed refresh; only the outbox owns the ticket. */
@@ -6073,16 +5186,6 @@ async function sessionRecoveryCountdowns(sessionId: string, conversationId: stri
     } : { kind: 'pickup', deadline: pickup.dueAt, visibleAt: pickup.dueAt - 30_000, next: 'continue' });
     return result;
   }
-  const pendingGoal = goalActiveFor(conversationId) ? goalPendingReplyFor(conversationId) : null;
-  if (pendingGoal && !pendingGoal.silenceSourceTurnId && runningToolCalls(conversationId) === 0 &&
-      await readCompletedFinal(sessionId, conversationId, pendingGoal.turnId) &&
-      goalPendingReplyFor(conversationId)?.acceptedAt === pendingGoal.acceptedAt) {
-    const next = goalModeFor(conversationId);
-    if ((pendingGoal.listenUntil ?? 0) > Date.now())
-      return [{ kind: 'native-busy', deadline: pendingGoal.listenUntil!, next }];
-    const pickup = pickupWatch.get(conversationId);
-    if (pickup) return [{ kind: 'pickup', deadline: pickup.dueAt, visibleAt: pickup.dueAt - 30_000, next }];
-  }
   if (browserPresent() && session.browserRecoveryDismissedAt === undefined) {
     const deadlines = [...unattributedIncidents.values()].flatMap(incident => {
       if (incident.pass >= 2) return [];
@@ -6111,7 +5214,7 @@ async function sessionRecoveryCountdowns(sessionId: string, conversationId: stri
   // One presentation window for active and incompletely ended turns. The work
   // owner keeps its actual deadline; native completion cannot reveal it early.
   if (owned && !confirmed &&
-      (grant.thinkingFailed || recoveryInputAllowed(sessionId, conversationId) || tabRecoveryWanted(conversationId) || loopAfterTurnFor(conversationId) || queuedAfterTurn)) {
+      (grant.thinkingFailed || recoveryInputAllowed(sessionId, conversationId) || tabRecoveryWanted(conversationId) || queuedAfterTurn)) {
     result.push({ kind: 'silence', deadline: grant.until,
       visibleAt: grant.until - (grant.model === 'pro' ? 300_000 : 30_000) });
     return result;
@@ -6124,13 +5227,11 @@ async function sessionRecoveryCountdowns(sessionId: string, conversationId: stri
   const queued = rows.find(row => row.sessionId === sessionId && row.state === 'queued' && row.purpose !== 'decision' &&
     row.silenceBoundary?.conversationId === conversationId && row.silenceBoundary.turnId === source && row.silenceBoundary.listenUntil &&
     (row.silenceBoundary.nativeBusy || boundary?.kind !== 'turn_end' || boundary.outcome !== 'completed'));
-  const reply = goalPendingReplyFor(conversationId);
-  const goalDeadline = goalActiveFor(conversationId) && reply?.silenceSourceTurnId === source ? reply.listenUntil : undefined;
   const failedDeadline = grant?.sessionId === sessionId && grant.turnId === source && grant.thinkingFailed &&
     repairsInFlight.get(conversationId)?.state === 'done' ? grant.until : undefined;
-  const deadline = queued?.silenceBoundary?.listenUntil ?? goalDeadline ?? failedDeadline ?? postReloadDeadline;
+  const deadline = queued?.silenceBoundary?.listenUntil ?? failedDeadline ?? postReloadDeadline;
   const thinkingFailed = boundary?.kind === 'turn_end' && boundary.reason === 'thinking_failed';
-  const next = queuedAfterTurn ? 'queue' : goalDeadline ? goalModeFor(conversationId) : undefined;
+  const next = queuedAfterTurn ? 'queue' : undefined;
   if (deadline) result.push({ kind: !queued?.silenceBoundary?.nativeBusy && deadline === reloadDeadline ? 'post-reload' :
     queued?.silenceBoundary?.nativeBusy || !thinkingFailed ? 'native-busy' : 'thinking-failed', deadline,
     ...(postReloadDeadline && !queued?.silenceBoundary?.nativeBusy && deadline === reloadDeadline &&
@@ -6157,7 +5258,7 @@ interface Repair {
   state: 'queued' | 'handed' | 'done';
   /** Stable identity of the failure/inactivity episode. A new activity stamp mints a new one. */
   episode: string;
-  reason: 'unattributed' | 'assistant-error' | 'no-tab' | 'silence' | 'goal' | 'compaction' | 'stalled';
+  reason: 'unattributed' | 'assistant-error' | 'no-tab' | 'silence' | 'pickup' | 'compaction' | 'stalled';
   /** Cooldown boundary. The browser is never asked before this instant. */
   notBefore: number;
   /**
@@ -6227,7 +5328,7 @@ function retireInactiveWorkerRecovery(): void {
 }
 
 function repairNeedsClaim(repair: Repair): boolean {
-  return ['unattributed', 'assistant-error', 'silence', 'no-tab', 'stalled', 'goal', 'compaction'].includes(repair.reason);
+  return ['unattributed', 'assistant-error', 'silence', 'no-tab', 'stalled', 'pickup', 'compaction'].includes(repair.reason);
 }
 
 /** The queued phase belongs to one live ticket, never to an earlier failed attempt
@@ -6241,12 +5342,11 @@ function compactionRepairCurrent(conversationId: string, repair: Repair): boolea
 
 /** Recheck the original source immediately before a silence reload can execute. */
 async function silenceRepairCurrent(conversationId: string, repair: Repair): Promise<boolean> {
-  if (repair.reason === 'goal' && repair.state !== 'done') {
+  if (repair.reason === 'pickup' && repair.state !== 'done') {
     const watch = pickupWatch.get(conversationId);
     const pickup = (await owedPickups(Date.now())).get(conversationId);
     return !!watch && !!pickup && pickup.replyId === watch.replyId &&
       Date.now() >= pickup.listenUntil && Date.now() < watch.expiresAt &&
-      (!pickup.queued ? !goalDraftBusy(conversationId) : true) &&
       runningToolCalls(conversationId) === 0 && !continuationForSession(repair.sessionId) &&
       pickupWatch.get(conversationId) === watch && repairsInFlight.get(conversationId) === repair;
   }
@@ -6327,7 +5427,7 @@ async function assistantRepairCurrent(conversationId: string, repair: Repair): P
  * Every trigger converges here. A second reason while an action is already pending is the same
  * recovery, not another reload. Once carried out it stays spent until new activity changes the
  * episode key; the three-minute floor then protects distinct error/no-tab failures. Silence,
- * Goal and compaction carry their own schedules and therefore bypass that unrelated floor.
+ * Pickups and compaction carry their own schedules and therefore bypass that unrelated floor.
  */
 function queueBrowserRecovery(
   conversationId: string,
@@ -6343,7 +5443,7 @@ function queueBrowserRecovery(
   // conversation whose every tool call is already being refused a brand-new tab to try from.
   // Recovery exists to get a chat working again, which is the opposite of what the user asked
   // for. Every trigger converges on this function — silence, no-tab, unattributed,
-  // assistant-error, goal, compaction — so refusing here refuses all of them, and none of them
+  // assistant-error, pickup, compaction — so refusing here refuses all of them, and none of them
   // needs its own exemption.
   if (!sessionId || !workerRecoveryAllowed(conversationId) || isChatBlocked(conversationId) || stopRequestedFor(conversationId)) return false;
   // The turn's one error reload, already spent. Checked before the episode and state guards
@@ -6377,7 +5477,7 @@ function queueBrowserRecovery(
   // Silence already paid its complete two-minute inactivity boundary. Once genuine new activity
   // starts another episode, layering the unrelated browser-action floor on top delays the next
   // stuck-page recovery beyond its own contract. Assistant-error repairs keep that shared
-  // floor; attribution owns its fixed two-attempt schedule. `goal` is exempt for the same reason and a stronger one: it carries its own backoff,
+  // floor; attribution owns its fixed two-attempt schedule. `pickup` carries its own backoff,
   // which after the opening step is already longer than the shared floor, so applying both would
   // only move the user's stated schedule without changing what protects the page. `no-tab` is
   // exempt because the floor protects a page that is still loading from a second reload, and a
@@ -6385,7 +5485,7 @@ function queueBrowserRecovery(
   // floor for two and a half minutes because a silence reopen had landed moments earlier. One
   // close is one reopen, and it is immediate.
   const notBefore =
-    reason === 'silence' || reason === 'goal' || reason === 'compaction' || reason === 'no-tab' || reason === 'unattributed'
+    reason === 'silence' || reason === 'pickup' || reason === 'compaction' || reason === 'no-tab' || reason === 'unattributed'
       ? now
       : Math.max(now, (lastBrowserRecoveryAt.get(conversationId) ?? 0) + BROWSER_RECOVERY_COOLDOWN_MS);
   const repair: Repair = {
@@ -6408,7 +5508,7 @@ function queueBrowserRecovery(
   // A queued durable pickup used to wait forever when Chrome itself had exited:
   // nobody remained to collect /status. This same accepted repair owns one cold
   // start through the existing startup owner; no new timer or opening retry exists.
-  if ((reason === 'goal' || reason === 'compaction') && getConfig().ui.browserOnly !== true) {
+  if ((reason === 'pickup' || reason === 'compaction') && getConfig().ui.browserOnly !== true) {
     const pickup = pickupWatch.get(conversationId);
     const ticket = continuationForSession(sessionId);
     const lifecycle = bridgeLifecycleEpoch;
@@ -6425,7 +5525,7 @@ function queueBrowserRecovery(
           if (reason === 'compaction') return !!ticket && ticket.from === conversationId &&
             continuationForSession(sessionId)?.token === ticket.token && continuationForSession(sessionId)?.state === 'awaiting-summary';
           // Queued user work and interrupted-response Continue use this same
-          // pickup even with Goal Off. Recheck their actual durable source at
+          // pickup. Recheck its actual durable source at
           // both startup fences, including cancellation and a later page close.
           return owedPickups(Date.now()).then(owed => current() && !!pickup &&
             pickupWatch.get(conversationId) === pickup && !continuationForSession(sessionId) &&
@@ -6506,14 +5606,13 @@ async function noteRecoveryObservations(
     }
   }
   // Access-limit diagnostics are recorded history, not renewed work. Preserve both the
-  // existing deadline and repair/Goal pickup custody unless this batch proves work or a
+  // existing deadline and pickup custody unless this batch proves work or a
   // terminal boundary. A completed answer must still retire the repair it supersedes.
   if (activity.meaningful && (activity.working || activity.terminal)) {
     if (sessionId && activity.working && !activity.terminal) {
       // Withdraw reload authority before awaiting the serialized input owner.
       noteRecoveryActivity(conversationId);
       await revokeSilenceInputs(sessionId);
-      await revokeSilenceLoop(conversationId);
     }
     if (!sameFailedRepair && (!activity.terminal || !observations.some(item => item.kind === 'turn_end' && item.outcome === 'stalled')))
       noteRecoveryActivity(conversationId);
@@ -6563,9 +5662,6 @@ async function noteRecoveryObservations(
       : terminalGrant.evidenceAt + silenceWindowMs(terminalGrant);
     activeUntil.set(conversationId, terminalGrant);
     if (confirmed) {
-      const pending = goalPendingReplyFor(conversationId);
-      if (pending?.silenceSourceTurnId === ended.turnId)
-        await deferSilenceGoalReplyNow(conversationId, pending.turnId, terminalGrant.until);
       await fileSilenceInputTicket(conversationId, Date.now());
     }
     await inspectSilentChats(Date.now());
@@ -6576,7 +5672,7 @@ async function noteRecoveryObservations(
   const awaitingSilenceRefresh = !!lastEnd && !!sessionId &&
     ((lastEnd === 'completed' && recoveryInputAllowed(sessionId, conversationId)) ||
       (['stalled', 'failed', 'unknown', 'interrupted', 'error'].includes(lastEnd) &&
-        (recoveryInputAllowed(sessionId, conversationId) || loopAfterTurnFor(conversationId) || await hasQueuedAfterTurnInput(sessionId))));
+        (recoveryInputAllowed(sessionId, conversationId) || await hasQueuedAfterTurnInput(sessionId))));
   const mcpTerminal = !thinkingFailed && !terminalGrant?.thinkingFailed && terminalGrant?.turnId && activity.endedTurnId === terminalGrant.turnId && sessionId && activity.terminal &&
     lastEnd !== 'stopped' && await turnHasMcpCall(sessionId, conversationId, terminalGrant.turnId);
   const finalTurn = activity.endedTurnId ?? terminalGrant?.turnId;
@@ -6640,14 +5736,8 @@ async function noteRecoveryObservations(
     // silence watchdog down and asked the browser to recover against a live block. The
     // English match stays for extension documents older than the flag.
     if (accessLimit(item)) {
-      // Preserve an active Goal/Loop's existing exact silence owner, without renewing its
-      // deadline or creating retry authority from a dismissed dialog. Ordinary chats still
-      // retire their watchdog; the normal bounded recovery path owns any later action.
-      const grant = activeUntil.get(conversationId);
-      const preserveGoalRecovery = !!sessionId && recorded?.conversationId === conversationId &&
-        goalActiveFor(conversationId) && grant?.sessionId === sessionId &&
-        (!item.turnId || grant.turnId === item.turnId);
-      if (!preserveGoalRecovery) endActivity(conversationId);
+      // An access-limit notice is not fresh work and does not authorize automatic recovery.
+      endActivity(conversationId);
       continue;
     }
     if (item.recoverable !== true) continue;
@@ -6763,19 +5853,11 @@ async function browserTabPolicy(openConversations: Set<string>) {
   const protectedChats = new Set(nonDiscardableAgentConversations());
   for (const entry of pendingContinuations()) protectedChats.add(entry.from);
   // Recorder history can restore an unclosed old turn. Only the existing live-work grant,
-  // running tools, automation/broker obligation and fresh page proof protect pruning.
+  // running tools, broker obligation and fresh page proof protect pruning.
   for (const [id, grant] of activeUntil) if (grant.until > Date.now()) protectedChats.add(id);
   const inputs = await listInputs();
-  // A cancelled send remains a tombstone, not a renderer lease. Only the durable
-  // dedicated-helper role and exact claim permit retirement. Opening helpers have no
-  // source yet; established helpers must still name a distinct existing source.
-  const cancelledDecisionClaims = inputs.filter(row => row.purpose === 'decision' && !row.lifetime &&
-    row.state === 'cancelled' && row.owner && row.conversationId && openConversations.has(row.conversationId) &&
-    isGoalDecisionChat(row.conversationId) && (!row.decisionSourceSessionId ||
-      summaries.some(source => source.id === row.decisionSourceSessionId && source.conversationId !== row.conversationId)));
-  for (const row of cancelledDecisionClaims) managed.add(row.conversationId!);
   for (const row of inputs) if (!row.sessionId && row.purpose !== 'decision' && row.deliveredAt !== undefined && row.conversationId && openConversations.has(row.conversationId)) managed.add(row.conversationId);
-  for (const id of managed) if (runningToolCalls(id) > 0 || goalActiveFor(id)) protectedChats.add(id);
+  for (const id of managed) if (runningToolCalls(id) > 0) protectedChats.add(id);
   for (const row of inputs) {
     if (!['queued', 'browser', 'decision'].includes(row.state)) continue;
     // Queued text follows the durable session; a handed-out claim still protects
@@ -6806,7 +5888,6 @@ async function browserTabPolicy(openConversations: Set<string>) {
     note(agent.conversationId, agent.sleptAt);
   }
   for (const row of inputs) note(row.conversationId, row.deliveredAt);
-  for (const row of cancelledDecisionClaims) note(row.conversationId, row.sendAuthorizedAt ?? row.offeredAt ?? row.createdAt);
   const blocked = [...managed].filter(isChatBlocked);
   for (const id of blocked) {
     protectedChats.delete(id);
@@ -6815,7 +5896,7 @@ async function browserTabPolicy(openConversations: Set<string>) {
     const at = chatBlockedAt(id);
     if (at !== null) lastActivity.set(id, at);
   }
-  const terminal = new Set([...blocked, ...cancelledDecisionClaims.map(row => row.conversationId!)]);
+  const terminal = new Set(blocked);
   const latestDesktopReceipt = new Map<string, (typeof inputs)[number]>();
   for (const row of inputs) {
     if (row.purpose === 'decision' || !row.conversationId || row.deliveredAt === undefined) continue;
@@ -6847,13 +5928,13 @@ async function browserTabPolicy(openConversations: Set<string>) {
   return {
     idleReuseAfterMs: 120_000,
     idleCloseAfterMs: 300_000,
-    cancelledDecisionClaims: cancelledDecisionClaims.map(row => ({ id: row.id, owner: row.owner, conversationId: row.conversationId })),
+    cancelledDecisionClaims: [],
     // Only terminal/blocked helpers and superseded sources grant close authority.
     retiredConversations: [...new Set([...idle, ...supersededSourceConversations()])]
       .filter(id => openConversations.has(id) && !protectedChats.has(id)).sort(),
     conversationActivityAt: Object.fromEntries(lastActivity),
     managedConversations: [...managed].sort(),
-    reusableConversations: available.filter(id => quietFor(id, 120_000) && !isGoalDecisionChat(id) &&
+    reusableConversations: available.filter(id => quietFor(id, 120_000) &&
       !supersededSourceConversations().includes(id)).sort(),
     nonDiscardableConversations: [...protectedChats].sort(),
     blockedConversations: blocked.sort(),
@@ -6864,13 +5945,11 @@ async function browserTabPolicy(openConversations: Set<string>) {
 /**
  * Whether silence or a missing tab may reopen or reload this chat at all.
  *
- * A chat the Goal or Loop switch is driving is always brought back: the loop is the user's
- * standing instruction to keep that chat going, and a closed browser is not a reason to stop
- * carrying it out. Every other chat — a worker, a prime, a plain chat that has called tools —
- * comes back only when the user has turned tab recovery on for them, and that starts off.
+ * Worker, prime, and ordinary tool-using chats come back only when the user has turned tab
+ * recovery on. That setting starts off.
  */
-function tabRecoveryWanted(conversationId: string): boolean {
-  return goalActiveFor(conversationId) || getConfig().multiAgent.recoverAgentTabs;
+function tabRecoveryWanted(_conversationId: string): boolean {
+  return getConfig().multiAgent.recoverAgentTabs;
 }
 
 /** The active agent chats for which the browser must keep asking the app for recovery work. */
@@ -6908,10 +5987,10 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
       continue;
     }
     const pro = await extendedSilenceWindowFor(conversationId, grant.sessionId);
-    const afterTurn = recoveryInputAllowed(grant.sessionId, conversationId) || loopAfterTurnFor(conversationId) || await hasQueuedAfterTurnInput(grant.sessionId);
+    const afterTurn = recoveryInputAllowed(grant.sessionId, conversationId) || await hasQueuedAfterTurnInput(grant.sessionId);
     if (activeUntil.get(conversationId) !== grant) continue;
     if (afterTurn && runningToolCalls(conversationId) > 0) {
-      grant.until = now + GOAL_QUIET_MS;
+      grant.until = now + PICKUP_QUIET_MS;
       deferred = true;
       continue;
     }
@@ -6996,18 +6075,18 @@ function finishSilentChats(conversationIds: readonly string[]): void {
     // Keep the existing exact receipt until genuine activity retires it. A large
     // replacement page can report Thinking failed after this maintenance pass.
     const repair = repairsInFlight.get(conversationId);
-    if (repair?.reason !== 'goal' && repair?.reason !== 'unattributed' && (repair?.reason !== 'silence' || repair.state !== 'done' || !repair.progress?.turnId))
+    if (repair?.reason !== 'pickup' && repair?.reason !== 'unattributed' && (repair?.reason !== 'silence' || repair.state !== 'done' || !repair.progress?.turnId))
       repairsInFlight.delete(conversationId);
   }
   if (conversationIds.length) changed();
 }
 
 /**
- * When a chat with an undelivered input or Goal/Loop decision is reloaded, measured from its last sign of life.
+ * When a chat with undelivered input is reloaded, measured from its last sign of life.
  *
  * The first number is the silence window over again, and deliberately the same one: two minutes
  * with nothing arriving is this app's standing definition of a chat that has stopped, and a
- * conversation the loop is driving does not get a different definition just because what stalled
+ * conversation with a queued pickup does not get a different definition just because what stalled
  * was the pickup rather than the turn. Retries slow to fifteen minutes and retain that
  * cadence while the original bounded obligation remains eligible. A temporary outage
  * longer than five attempts must not silently strand still-owed work.
@@ -7017,7 +6096,7 @@ function finishSilentChats(conversationIds: readonly string[]): void {
 const PICKUP_BACKOFF_MS = [2, 5, 10, 15].map((minutes) => minutes * 60_000) as [number, ...number[]];
 
 /**
- * One reload schedule per chat that still owes input or a Goal/Loop decision.
+ * One reload schedule per chat that still owes input.
  *
  * Attempts advance through the backoff, then retain the fifteen-minute cadence.
  * Activity postpones a pickup without resetting its backoff. The original durable
@@ -7092,13 +6171,6 @@ function expediteCompactionPickup(conversationId: string): boolean {
   return true;
 }
 
-/** A switch change revokes the repair, but never refunds this source's spent budget. */
-function forgetGoalWatch(conversationId: string): void {
-  // An input can be queued immediately before Off, before the next watch sweep sees it.
-  // Retain the source tombstone even then; only a new source or expiry replaces it.
-  if (repairsInFlight.get(conversationId)?.reason === 'goal') repairsInFlight.delete(conversationId);
-}
-
 /**
  * Serving epoch and minimum start time for restored pickups. Durable current-owner
  * obligations survive restart, but receive their normal first grace period on startup.
@@ -7115,30 +6187,11 @@ function notePickupActivity(conversationId: string): void {
   watch.dueAt = Date.now() + gap;
 }
 
-/** One pickup tree for authored input, unfinished Continue and final-driven Goal/Loop.
- * Their durable owners retain text/decision debt; this projection elects one source per
+/** One pickup tree for authored input and unfinished Continue work.
+ * Durable owners retain text debt; this projection elects one source per
  * chat and shares its reload budget. A reload never generates a second obligation. */
 async function owedPickups(now: number): Promise<Map<string, { conversationId: string; sessionId: string; replyId: string; acceptedAt: number; listenUntil: number; pro: boolean; queued: boolean }>> {
   const owed = new Map<string, { conversationId: string; sessionId: string; replyId: string; acceptedAt: number; listenUntil: number; pro: boolean; queued: boolean }>();
-  for (const reply of pendingGoalReplies(now)) {
-    const pending = goalPendingReplyFor(reply.conversationId);
-    if (!pending) continue;
-    if (!goalActiveFor(reply.conversationId) || goalDraftNeedsIntervention(reply.conversationId) || !await loopReplyHasAuthority(reply.sessionId, reply.conversationId, pending.turnId) ||
-        await goalInputPriority(reply.conversationId, reply.sessionId, pending.turnId) ||
-        await astraFinishOnly(reply.sessionId, reply.conversationId) || await suppressProSilence(reply.conversationId)) continue;
-    const source = await goalReplySourceTurn(reply.sessionId, pending.silenceSourceTurnId ?? pending.turnId);
-    if (!source) continue;
-    // Restored debt is authority only for its own latest question. Session history
-    // survives restart too; an older final cannot recover over a newer user turn.
-    const [latestQuestion] = await readRecentEvents(reply.sessionId, 1, { kinds: ['user_message', 'turn_start'] });
-    const questionPosition = latestQuestion?.kind === 'user_message' ? latestQuestion.origin ?? latestQuestion.seq : latestQuestion?.seq ?? 0;
-    if (latestQuestion && ((pending.eventSeq > 0 && questionPosition > pending.eventSeq) ||
-        (latestQuestion.kind === 'turn_start' && latestQuestion.turnId !== source))) continue;
-    const current = goalPendingReplyFor(reply.conversationId);
-    if (current?.replyId !== pending.replyId || current.acceptedAt !== pending.acceptedAt) continue;
-    owed.set(reply.conversationId, { ...reply, replyId: source,
-      listenUntil: pending.listenUntil ?? 0, pro: loopAfterTurnFor(reply.conversationId), queued: false });
-  }
   for (const input of await pendingQueuedPickups()) owed.set(input.conversationId,
     { ...input, replyId: input.sourceTurnId, queued: true });
   for (const [id, pickup] of owed) {
@@ -7155,12 +6208,12 @@ async function inspectOwedPickups(now: number): Promise<boolean> {
   const owed = await owedPickups(now);
   if (pickupWatchFloor !== floor) return false;
   // Keep the spent episode while its source is absent: cancellation/reordering must not
-  // refund retries if another queue item or Goal later uses that same boundary.
+  // refund retries if another queue item later uses that same boundary.
   for (const [conversationId, watch] of pickupWatch) {
     if (now >= watch.expiresAt) pickupWatch.delete(conversationId);
     if (now < watch.expiresAt && owed.get(conversationId)?.replyId === watch.replyId) continue;
     const repair = repairsInFlight.get(conversationId);
-    if (repair?.reason === 'goal' && (now >= watch.expiresAt || repair.state !== 'handed' || owed.has(conversationId))) repairsInFlight.delete(conversationId);
+    if (repair?.reason === 'pickup' && (now >= watch.expiresAt || repair.state !== 'handed' || owed.has(conversationId))) repairsInFlight.delete(conversationId);
   }
   let queued = false;
   for (const reply of owed.values()) {
@@ -7177,19 +6230,15 @@ async function inspectOwedPickups(now: number): Promise<boolean> {
       pickupWatch.set(reply.conversationId, watch);
     }
     if (now < watch.dueAt || now < reply.listenUntil) continue;
-    if (!reply.queued && goalDraftBusy(reply.conversationId)) {
-      notePickupActivity(reply.conversationId);
-      continue;
-    }
     const held = repairsInFlight.get(reply.conversationId);
-    if (held?.state === 'done' && held.reason === 'goal') repairsInFlight.delete(reply.conversationId);
+    if (held?.state === 'done' && held.reason === 'pickup') repairsInFlight.delete(reply.conversationId);
     else if (held && held.state !== 'done') continue;
     if (!queueBrowserRecovery(reply.conversationId, reply.sessionId,
-      `goal:${reply.replyId}:${watch.attempts}`, 'goal', 0, now)) continue;
+      `pickup:${reply.replyId}:${watch.attempts}`, 'pickup', 0, now)) continue;
     watch.attempts += 1;
     watch.dueAt = now + PICKUP_BACKOFF_MS[Math.min(watch.attempts, PICKUP_BACKOFF_MS.length - 1)]!;
     queued = true;
-    logInfo(`bridge: next automation/input step uncollected in ${reply.conversationId} — reload ${watch.attempts}`);
+    logInfo(`bridge: queued input step uncollected in ${reply.conversationId} — reload ${watch.attempts}`);
   }
   return queued;
 }
@@ -7297,8 +6346,8 @@ async function inspectOwedCompactions(now: number): Promise<boolean> {
  * chat that is working, read from its activity ledger before the close ends it — or a worker
  * slot that was working when the tab went (the close itself detached it; a sleeping worker's
  * tab closing is not an event). A Prime or Worker is what `recoverAgentTabs` is a
- * preference about; a Goal/Loop chat is always brought back; any other chat qualifies on the one
- * fact that makes it this app's business — it has proved at least one MCP call. A chat that has
+ * preference about; any other chat qualifies on the one fact that makes it this app's business —
+ * it has proved at least one MCP call. A chat that has
  * never called a tool is the user's own browsing: closing it is not a failure, and reopening it
  * would be this app helping itself to a tab nobody asked it to keep.
  *
@@ -7333,8 +6382,8 @@ async function queueMissingTab(conversationId: string, working: boolean, now = D
     revival.conversationId === conversationId && revival.runId === slot.runId && revival.messageIds.length > 0);
   if (slot && slot.state !== 'detached' && !wakePending)
     return declined(`its ${slot.role} slot is ${slot.state}, not working`);
-  if (!slot && !goalActiveFor(conversationId) && (session.toolCalls ?? 0) === 0) return declined('it has never called a tool');
-  if (!working && slot?.role !== 'worker' && !(goalActiveFor(conversationId) && goalPendingReplyFor(conversationId))) return declined('no turn is running in it');
+  if (!slot && (session.toolCalls ?? 0) === 0) return declined('it has never called a tool');
+  if (!working && slot?.role !== 'worker') return declined('no turn is running in it');
   const wentAt = slot?.detachedAt ?? session.endedAt ?? now;
   if (queueBrowserRecovery(conversationId, session.id, `no-tab:${wentAt}`, 'no-tab', 0, now)) {
     logInfo(`bridge: ${name} has no tab — asking the browser to open the exact chat once`);
@@ -7372,13 +6421,13 @@ async function queueStalledTabRecovery(conversationId: string, now = Date.now())
   if (agent && agent.state !== 'detached' && agent.state !== 'active' && agent.state !== 'waking') {
     return declined(`its ${agent.role} slot is ${agent.state}, not working`);
   }
-  if (!agent && !compacting && !goalActiveFor(conversationId) && (session.toolCalls ?? 0) === 0) {
+  if (!agent && !compacting && (session.toolCalls ?? 0) === 0) {
     return declined('it has never called a tool');
   }
   const working =
     liveConversations().some((entry) => entry.conversationId === conversationId && (entry.generating || Boolean(entry.activeTurnId))) ||
     (activeUntil.get(conversationId)?.until ?? 0) > now;
-  if (!working && !compacting && agent?.role !== 'worker' && !(goalActiveFor(conversationId) && goalPendingReplyFor(conversationId))) {
+  if (!working && !compacting && agent?.role !== 'worker') {
     return declined('no turn is running in it');
   }
   if (queueBrowserRecovery(conversationId, session.id, `stalled:${now}`, 'stalled', 0, now)) {
@@ -7458,7 +6507,6 @@ function noteCallAttribution(
   endsActivity = false,
   completedFinalAt: number | null = null,
   requestId: string | null = null,
-  reopenedTurnId: string | null = null,
   filedSession: SessionSummary | null = null
 ): void {
   if (conversationId) {
@@ -7467,14 +6515,6 @@ function noteCallAttribution(
     if (currentConversation && filedSession?.id === sessionId && filedSession.conversationId === conversationId)
       noteAgentContextTokens(conversationId, filedSession.contextTokens);
     if (currentConversation && !endsActivity) lastAttributedCallAt.set(conversationId, Date.now());
-    // The recorder has just withdrawn a completed end the page reported: the same server turn
-    // went on calling tools. Whatever Goal was drafting for that end — or had filed as owed —
-    // was a reply to an answer that has not been given. The real end, when the page sees it,
-    // files its own obligation.
-    if (reopenedTurnId && retireGoalDraftsFor(conversationId)) {
-      forgetGoalWatch(conversationId);
-      logInfo(`goal: withdrew the decision owed for turn ${reopenedTurnId} of ${conversationId} — the turn is still running`);
-    }
     for (const incident of unattributedIncidents.values()) {
       const candidate = incident.candidates.find(entry => entry.conversationId === conversationId && entry.sessionId === sessionId);
       if (currentConversation && candidate && filedSession?.conversationId === conversationId &&
@@ -7486,13 +6526,12 @@ function noteCallAttribution(
     armUnattributedTick();
     // Exact recording authority follows the durable lineage, but recovery authority does not.
     // A late request from handoff source A is still filed in the A->B session above; once that
-    // session says B is current, the same request must not put A back on the silence/Goal clock.
+    // session says B is current, the same request must not put A back on the recovery clock.
     if (!currentConversation) {
       const grant = activeUntil.get(conversationId);
       if (grant?.sessionId === sessionId) activeUntil.delete(conversationId);
       const repair = repairsInFlight.get(conversationId);
       if (repair?.sessionId === sessionId) repairsInFlight.delete(conversationId);
-      forgetGoalWatch(conversationId);
       compactionWatch.delete(conversationId);
       armSilenceSweep();
       return;
@@ -7530,8 +6569,7 @@ function noteCallAttribution(
         (!continuingMcp && !filedSession?.activeTurnId && filedSession?.lastTurnEndAt != null && startedAt <= filedSession.lastTurnEndAt))) return;
     // The exact call is stronger than browser lifecycle state: the model is still working even
     // when Chrome, the tab or a reload destroyed the page's local turn projection.
-    const sourceTurnId = filedSession?.activeTurnId ?? previous?.turnId ??
-      goalPendingReplyFor(conversationId)?.silenceSourceTurnId ?? filedSession?.finishTurn?.turnId ?? null;
+    const sourceTurnId = filedSession?.activeTurnId ?? previous?.turnId ?? filedSession?.finishTurn?.turnId ?? null;
     // A completed tool is real work too. Long-running calls must leave a full quiet
     // window for the model to process their result, without reviving historical finals.
     if (!isChatBlocked(conversationId)) {
@@ -7540,7 +6578,6 @@ function noteCallAttribution(
         .catch(error => logWarn(`agent: could not record resumed work: ${String(error)}`));
     }
     void revokeSilenceInputs(sessionId).catch(error => logWarn(`input: could not withdraw silence pickup: ${String(error)}`));
-    void revokeSilenceLoop(conversationId).catch(error => logWarn(`goal: could not withdraw silence pickup: ${String(error)}`));
     grantActivity(conversationId, sessionId, continuingMcp ? Date.now() : pro ? Math.min(Date.now(), startedAt) : Date.now(), CHAT_SILENCE_MS,
       { turnId: sourceTurnId, model: pro ? 'pro' : previous?.model ?? 'unknown', mcpBacked: true });
     noteRecoveryActivity(conversationId);
@@ -7672,7 +6709,7 @@ async function tickUnattributedIncident(): Promise<void> {
  * still exists, and whether there is exactly one of it are questions only the browser's own tab
  * registry can answer, and it answers them there.
  *
- * Ordinary repair handouts retain their existing retry behavior below. Queue/Goal pickups
+ * Ordinary repair handouts retain their existing retry behavior below. Queue pickups
  * are different: missing acknowledgement is ambiguous, so they keep the exact issued token
  * and are not handed out again on each poll. Only its receipt completes that attempt.
  *
@@ -7688,14 +6725,14 @@ async function takePendingRepairs(
   const pickupFloor = pickupWatchFloor;
   const owed = await owedPickups(now);
   for (const [conversationId, repair] of repairsInFlight) {
-    if (repair.reason !== 'goal') continue;
+    if (repair.reason !== 'pickup') continue;
     const pickup = owed.get(conversationId);
     const watch = pickupWatch.get(conversationId);
     // A handler/claim/listening transition can temporarily hide the owed head. Preserve
     // a handed token so its late receipt still settles; absence never authorizes a retry.
     if (repair.state === 'handed' && watch && now < watch.expiresAt && (!pickup || pickup.replyId === watch.replyId)) continue;
     if (!pickup || pickup.replyId !== watch?.replyId || pickupWatchFloor === null ||
-        now < pickup.listenUntil || continuationForSession(pickup.sessionId) || (!pickup.queued && goalDraftBusy(conversationId)))
+        now < pickup.listenUntil || continuationForSession(pickup.sessionId))
       repairsInFlight.delete(conversationId);
   }
   // The queue can outlive the decision that filled it: a repair queued a minute before the user
@@ -7724,7 +6761,6 @@ async function takePendingRepairs(
     if (session?.conversationId !== conversationId || superseded) turnRepairSpent.delete(conversationId);
     const grant = activeUntil.get(conversationId);
     if (grant?.sessionId === repair.sessionId) activeUntil.delete(conversationId);
-    forgetGoalWatch(conversationId);
     compactionWatch.delete(conversationId);
     armSilenceSweep();
     logInfo(
@@ -7737,7 +6773,7 @@ async function takePendingRepairs(
   // in place let the first entry win every pass, so one repair the browser could not carry out
   // starved every other chat behind it — precisely when several chats break at once.
   for (const [conversationId, repair] of [...repairsInFlight]) {
-    if (repair.state !== 'handed' || repair.reason === 'goal' || repairNeedsClaim(repair)) continue;
+    if (repair.state !== 'handed' || repair.reason === 'pickup' || repairNeedsClaim(repair)) continue;
     repair.state = 'queued';
     repairsInFlight.delete(conversationId);
     repairsInFlight.set(conversationId, repair);
@@ -7761,10 +6797,10 @@ async function takePendingRepairs(
     }
     // A missed pre-action claim may retry the same offer. Once claimed, ambiguous
     // acknowledgement keeps custody and cannot authorize a second browser action.
-    if (repair.reason === 'goal') {
+    if (repair.reason === 'pickup') {
       const current = (await owedPickups(Date.now())).get(conversationId);
       if (pickupWatchFloor !== pickupFloor || !current || current.replyId !== pickupWatch.get(conversationId)?.replyId || Date.now() < current.listenUntil ||
-          continuationForSession(current.sessionId) || (!current.queued && goalDraftBusy(conversationId))) {
+          continuationForSession(current.sessionId)) {
         if (repairsInFlight.get(conversationId) === repair) repairsInFlight.delete(conversationId);
         continue;
       }
@@ -7836,12 +6872,11 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | nu
         // Persist the next existing instruction as soon as this exact refresh is
         // acknowledged. Native readiness and the normal Send receipt still gate delivery.
         const inputFiled = await fileSilenceInputTicket(conversationId, Date.now());
-        if (!inputFiled && (loopAfterTurnFor(conversationId) || (failedGrant && failedGrant.model !== 'pro'))) await fileSilenceTickets([conversationId], Date.now());
         // The confirmed refresh owns one minute for ordinary models and five for
         // Pro, including failed views. These reuse the same grant and tickets.
         // Worker retirement retains its separate recovery rules below.
         const grant = activeUntil.get(conversationId);
-        if (grant && (grant.thinkingFailed || grant.model === 'pro' || goalActiveFor(conversationId) || inputFiled || !goalWorkerChat(conversationId))) {
+        if (grant && (grant.thinkingFailed || grant.model === 'pro' || inputFiled || !managedWorkerChat(conversationId))) {
           armSilenceSweep();
         } else grantActivity(
           conversationId,
@@ -7898,7 +6933,7 @@ function repairReason(repair: Repair): string {
     'no-tab': 'a missing browser tab',
     stalled: 'a suspended browser tab',
     silence: 'an unresponsive open turn',
-    goal: 'an undelivered follow-up'
+    pickup: 'an undelivered queued instruction'
   }[repair.reason];
 }
 
@@ -7918,8 +6953,8 @@ async function updateRepairProgress(conversationId: string, repair: Repair, text
   // rewrite of it. A reload of an open turn — an interrupted answer, a call the app could not
   // attribute, a silent turn — is part of that turn's story, so the row names the turn and the
   // page paints it inside the turn's Overwrite list, in order, like the tool calls around it
-  // (the user's ask of 2026-09-02). A reload with no turn open — a Goal reply nothing came to
-  // collect, a missing tab — names none and is placed between turns.
+  // (the user's ask of 2026-09-02). A reload with no turn open — for example a missing tab —
+  // names none and is placed between turns.
   const turnId =
     repair.progress?.turnId ??
     repair.assistantSource?.turnId ??

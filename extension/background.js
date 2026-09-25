@@ -30,20 +30,6 @@ const HELLO_TIMEOUT_MS = 1200;
 const REQUEST_TIMEOUT_MS = 10_000;
 /** A journal receipt follows durable session writes, which can outlast an ordinary read. */
 const EVENTS_REQUEST_TIMEOUT_MS = 60_000;
-/**
- * The deadline for the one route that waits on a model rather than on the app's own state.
- *
- * Ordinary reads use ten seconds; journal delivery has its own durable-write budget.
- * `/goal/open` is different: it holds the
- * connection open for a whole OpenRouter completion, which the app itself allows 180s for. A
- * shorter deadline here does not cancel that work — the app keeps going and the account is
- * still billed for the answer — it only guarantees nobody is left to receive it.
- *
- * So this sits above the app's own timeout on purpose. Whichever way the request ends, the
- * app's error handling is the half that gets to say why.
- */
-const MODEL_REQUEST_TIMEOUT_MS = 190_000;
-
 /** The reason a deadline aborts with, so it is a fact the caller can act on rather than prose. */
 const TIMED_OUT = 'the app took too long to answer';
 /** Bumped only when the request/response shape changes; the app compares it. */
@@ -849,37 +835,6 @@ function journalCountForConversation(conversationId) {
   return journal.reduce((count, entry) => count + (entry.conversationId === conversationId ? 1 : 0), 0);
 }
 
-/** Goal joins its own batches; another conversation's slow request is not its read barrier. */
-async function deliverConversationJournal(conversationId) {
-  const preference = { conversationId };
-  journalPreferences.add(preference);
-  try {
-    // Covers the bounded 4,000-row journal, including slot handoffs and split batches.
-    for (let attempt = 0; attempt < 120; attempt++) {
-      if (journalCountForConversation(conversationId) === 0) {
-        if (attempt > 0) await persistJournal();
-        return true;
-      }
-      startJournalWorkers();
-      if (journalFailed.has(conversationId)) return false;
-      const own = journalInFlight.get(conversationId);
-      if (own) {
-        if (!(await own)) return false;
-      } else {
-        // A pending command receipt forbids transcript delivery even if a slot is free.
-        if (commandAckOutbox.some(ack => ack?.conversationId === conversationId)) return false;
-        if (journalWorkers.size === 0) return false;
-        // A slot may be finishing its storage snapshot after the last HTTP batch. Its
-        // completion also frees capacity; waiting only on the other HTTP slot would stall.
-        await Promise.race([...journalInFlight.values(), ...journalWorkers]);
-      }
-    }
-    return journalCountForConversation(conversationId) === 0;
-  } finally {
-    journalPreferences.delete(preference);
-  }
-}
-
 // -------------------------------------------------------------------- transport
 
 async function fetchBounded(url, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
@@ -913,9 +868,7 @@ async function fetchBounded(url, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
  */
 function retryWanted() {
   // Paired at all is reason enough. The app hands out reopen/reload work only when this worker
-  // asks for it, and after a browser restart this worker holds no tabs and no queues — which is
-  // exactly when a Loop chat the user closed is waiting to be opened again. On 2026-09-02 a Loop
-  // prime sat unopened for good because nothing here thought it had a reason to ask.
+  // asks for it, including after a browser restart when this worker starts with no tabs or queues.
   return (
     token !== null ||
     journal.length > 0 ||
@@ -1668,19 +1621,6 @@ async function markTerminal(id) {
 function cleanConversationId(value) {
   const id = typeof value === 'string' ? value.trim() : '';
   return /^[0-9a-f-]{8,64}$/i.test(id) ? id : null;
-}
-
-/**
- * The mode a goal was written under, as a body fragment or nothing at all.
- *
- * Two words are legal and everything else is silently absent rather than passed on, because
- * the app pins whatever arrives here as a durable per-chat switch. Absent is a real answer:
- * it means "this page named no mode", which leaves the standing switch deciding exactly as
- * it did before the two buttons existed.
- */
-function goalMode(message) {
-  const mode = message && typeof message.mode === 'string' ? message.mode : '';
-  return mode === 'goal' || mode === 'loop' ? { mode } : {};
 }
 
 /** Records a tab's current conversation without writing storage on every poll. */
@@ -3330,13 +3270,9 @@ const HANDLERS = {
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
     await noteTabConversation(source, message.conversationId);
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
-    // Goal drafts are conversation-scoped in the app but browser writes are tab-scoped. Tell
-    // the app which tab is polling so two tabs showing the same chat cannot both receive and
-    // submit one ready Goal draft.
     const query =
       `?conversationId=${encodeURIComponent(message.conversationId)}` +
       `&since=${Number(message.since) || 0}` +
-      `&goalClient=${encodeURIComponent(String(source.tab))}` +
       // Forward only the helper states this document may report; these are diagnostics.
       (['absent', 'empty', 'ok'].includes(message.fiber) ? `&fiber=${message.fiber}` : '');
     const result = await call(`/activity${query}`);
@@ -3444,42 +3380,7 @@ const HANDLERS = {
     return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
   },
   /**
-   * The goal loop: this page saw its turn genuinely finish and wants the next user message.
-   *
-   * The API key never comes near this worker. The app is handed the conversation id and the
-   * generation id and answers with a draft — which is also why `turnId` is forwarded
-   * verbatim: it is the app's idempotency key, and a retried send must not become a second
-   * message in somebody's chat.
-   */
-  async goal_draft(message, _sender, source) {
-    await load();
-    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
-    const conversationId = cleanConversationId(message.conversationId);
-    if (!conversationId) return { ok: false, status: 400, error: 'bad_conversation_id' };
-    await noteTabConversation(source, conversationId);
-    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
-    // Goal builds its prompt from the app's durable session transcript. The final assistant
-    // row that caused this request can still be only in this worker's storage.session journal
-    // when an earlier /events call was delayed or failed. Spend no OpenRouter request until
-    // that row has crossed the same /events boundary normal transcript delivery uses.
-    if (!(await deliverConversationJournal(conversationId))) {
-      return { ok: false, status: 503, error: 'transcript_not_delivered', retryable: true };
-    }
-    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
-    const result = await call('/goal/draft', {
-      method: 'POST',
-      body: JSON.stringify({
-        conversationId,
-        turnId: String(message.turnId || ''),
-        clientId: String(source.tab),
-        ...(message.nativeBusy === true ? { nativeBusy: true } : {}),
-        ...(message.terminalRequired === true ? { terminalRequired: true } : {})
-      })
-    });
-    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
-  },
-  /**
-   * Selects the exact tab whose owned document is about to act on its own — a Goal draft, an
+   * Selects the exact tab whose owned document is about to act on its own, such as an
    * automatic Compact & Resume.
    *
    * The sender is the locator. Never search by conversation and never open a fallback: focus is
@@ -3504,74 +3405,13 @@ const HANDLERS = {
     try {
       await chrome.tabs.update(source.tab, { active: true });
     } catch {
-      // Focus is a courtesy. The page owns Goal regardless, so browser/UI refusal must not turn
-      // a valid hidden completion into a failed continuation.
+      // Focus is a courtesy. Browser/UI refusal must not turn a valid background action into a failure.
       return ownsDocument(source) ? { ok: false, error: 'focus_failed' } : { ok: false, error: 'stale_document' };
     }
     return ownsDocument(source) ? { ok: true, focused: true } : { ok: false, error: 'stale_document' };
   },
-  /** Typed, or given up on. Either way that draft is spent. */
-  async goal_ack(message, _sender, source) {
-    await load();
-    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
-    const result = await call('/goal/ack', {
-      method: 'POST',
-      body: JSON.stringify({
-        conversationId: message.conversationId,
-        token: String(message.token || ''),
-        ...(message.nativeBusy === true ? { nativeBusy: true } : {}),
-        clientId: String(source.tab)
-      })
-    });
-    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
-  },
   /**
-   * This chat's specific goal, set or cleared from the settings sheet.
-   *
-   * The text is the user's own and goes straight through; the app trims it and answers with
-   * what it actually stored, which is what the sheet then draws.
-   *
-   * `mode` is the button the goal was written under — "add specific goal" or "add specific
-   * loop" — and the app pins it as this chat's own switch in the same write. Only those two
-   * words cross; anything else is dropped rather than passed on, so a malformed sheet cannot
-   * put a third mode into a durable file.
-   */
-  async goal_objective(message, _sender, source) {
-    await load();
-    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
-    const conversationId = cleanConversationId(message.conversationId);
-    if (!conversationId) return { ok: false, status: 400, error: 'bad_conversation_id' };
-    await noteTabConversation(source, conversationId);
-    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
-    const result = await call('/goal/objective', {
-      method: 'POST',
-      body: JSON.stringify({ conversationId, text: String(message.text || ''), ...goalMode(message) })
-    });
-    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
-  },
-  /**
-   * The opening message for a chat ChatGPT has not named yet.
-   *
-   * No conversation id, because there is none to send: this is the request whose answer
-   * becomes the message that causes ChatGPT to issue one. Everything else about it is an
-   * ordinary goal draft, and the key stays in the app exactly as it does for those.
-   */
-  async goal_open(message, _sender, source) {
-    await load();
-    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
-    const result = await call('/goal/open', {
-      method: 'POST',
-      timeoutMs: MODEL_REQUEST_TIMEOUT_MS,
-      body: JSON.stringify({ text: String(message.text || ''), ...goalMode(message) })
-    });
-    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
-  },
-  /**
-   * The same two settings, for a chat that has no feed to read them from.
-   *
-   * `/activity` carries them otherwise, and it needs a conversation id. A New Chat has none
-   * and is still somewhere a goal can be written, so the sheet above that composer asks for
-   * them directly. Read-only, and conversation-free by construction.
+   * Read global browser-side settings for a page that has no conversation feed yet.
    */
   async settings_get(_message, _sender, source) {
     await load();
@@ -3579,7 +3419,7 @@ const HANDLERS = {
     const result = await call('/settings', { method: 'GET' });
     return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
   },
-  /** The composer's settings menu, which owns exactly two switches. */
+  /** The composer settings menu. */
   async settings_set(message, _sender, source) {
     await load();
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
@@ -3599,15 +3439,8 @@ const HANDLERS = {
     const conversationId = cleanConversationId(tabConversations[key]) ?? requestedConversation;
     const body = {};
     if (typeof message.autoCompact === 'boolean') body.autoCompact = message.autoCompact;
-    if (typeof message.loopAfterTurn === 'boolean') body.loopAfterTurn = message.loopAfterTurn;
-    // Goal and Loop are one setting behind two switches, and the app refuses a body carrying
-    // both. Pass through whichever one the sheet actually moved.
-    if (typeof message.goal === 'boolean') body.goal = message.goal;
-    else if (typeof message.loop === 'boolean') body.loop = message.loop;
-    // The conversation, whichever switch moved. Auto-compaction needs it so worker-role policy
-    // is enforced in the app; Goal and Loop need it because they are now that chat's own setting,
-    // and a sheet drawn beside one conversation is answering about that conversation. A New Chat
-    // has none, and moves the app-wide default it would have inherited.
+    // A named chat's automatic-compaction switch carries the proven conversation so worker-role
+    // policy is enforced in the app. A New Chat has none and changes the global default.
     if (conversationId) body.conversationId = conversationId;
     const result = await call('/settings', { method: 'POST', body: JSON.stringify(body) });
     return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
@@ -3742,11 +3575,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     'correlate',
     'closed',
     'compact',
-    'goal_draft',
     'focus_tab',
-    'goal_ack',
-    'goal_objective',
-    'goal_open',
     'settings_set',
     'settings_get',
     'repair_fiber',

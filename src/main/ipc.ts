@@ -5,23 +5,20 @@ import { mergeAppearance } from '../shared/appearance.js';
 import { prepareSessionPrompt, prepareSkillFollowup } from './session/prompt.js';
 import { listSkills } from './skills.js';
 import { listSkillLibrary } from './skill-library.js';
-import { noteChatOrigin } from './session/recorder.js';
 import { REASONING_EFFORTS } from '../shared/session.js';
 import { safeExternalLink } from '../shared/external-link.js';
 import { wakeBrowserWork } from './browser-wake.js';
 import { getChatModels, startChatModelDiscovery, configureChatModelDiscovery } from './chat-models.js';
-import { releaseSessionFinish, requestSessionFinishGoal } from './session/finish.js';
-import { GOAL_MARKER_INSTRUCTION } from '../shared/goal-templates.js';
+import { releaseSessionFinish } from './session/finish.js';
 import { validateInputImages } from './session/input-images.js';
 import { stageInputAttachment, type AttachmentSource } from './session/input-attachments.js';
 import { recordDeliveredInput, recordedInputImage } from './session/input-history.js';
 import { UI_BASE_ZOOM, titleBarOverlayForTheme, windowBackgroundForTheme } from './window-layout.js';
 import { usageOverview } from './session/usage.js';
-import { inputArgs, listInputs, editQueuedInput, reorderQueuedInputs, setInputAutomation, configureInputDelivery, pausedBrowserHelpers, cancelFinishInputs } from './session/input.js';
-import { draftOpeningMessage, onGoalChange, nativeGoalFailure } from './goal.js';
+import { inputArgs, listInputs, editQueuedInput, reorderQueuedInputs, configureInputDelivery } from './session/input.js';
+import { draftTaskPlan } from './planner.js';
 import { cancelTaskRequest, runTaskRequest } from './task-request.js';
 import { randomUUID } from 'node:crypto';
-import { retryGoalBrowserHelper } from './goal.js';
 import { requestBrowserPreferences } from './browser-preferences.js';
 import { sendDesktopInput, cancelDesktopInput, retryQueuedInputBrowser } from './session/start-input.js';
 import { wakeBrowserUrl } from './browser-startup.js';
@@ -42,16 +39,11 @@ import {
   CAPABILITIES,
   browserExtensionRequired,
   CHAT_BROWSERS,
-  GOAL_MODES,
-  GOAL_PROVIDERS,
-  GOAL_REASONING_LEVELS,
   type AppState,
   type Config
 } from '../shared/types.js';
-import { MAX_GOAL_SYSTEM_PROMPT_CHARS } from '../shared/goal.js';
 import { applySettings, connect, disconnect, getStatus, onStatusChange } from './connection.js';
 import { effectiveCapabilities, getConfig, updateConfig, MAX_MCP_INSTRUCTIONS_CHARS } from './config.js';
-import { clearAllGoalSwitches, draftTaskPlan, listGoalModels, MODEL_PAGE_SIZE, retireGoalDrafts, goalBackendFor, goalSwitchFor, setGoalSwitchNow, setGoalReplyActiveNow, setGoalObjectiveNow } from './goal.js';
 import { forgetExposedSurface } from './mcp/server.js';
 import { runDiagnostics } from './diagnostics.js';
 import { formatLogAsJson, formatLogForClipboard, getLog, logInfo, onLog } from './logger.js';
@@ -70,7 +62,7 @@ import {
   sessionActivityExpiresAt,
   sessionInputActivity,
   recoveryInputAllowed,
-  sessionControlsFor, stopSessionTurn, setSessionAutomation, setSessionObjective, compactSession, cancelSessionCompaction,
+  sessionControlsFor, stopSessionTurn, compactSession, cancelSessionCompaction,
   cancelWorkerCommands,
   chatUrl,
   onBridgeChange,
@@ -153,9 +145,9 @@ const settingsPatch = z.object({
     chatBrowser: z.enum(CHAT_BROWSERS).optional(),
     developerMode: z.boolean().optional(),
     finishTool: z.boolean().optional(),
-    planBackend: z.enum(['chatgpt', 'api']).optional(),
-    finishAction: z.enum(['notify', 'goal']).optional(),
     finishLeadMinutes: z.number().int().min(3).max(5).optional(),
+    planModel: z.string().trim().min(1).max(80).optional(),
+    planReasoning: z.enum(['', ...REASONING_EFFORTS]).optional(),
     backgroundChats: z.boolean().optional(),
     browserOnly: z.boolean().optional(),
     autoRefreshPlugins: z.boolean().optional(),
@@ -187,47 +179,6 @@ const settingsPatch = z.object({
     recoverAgentTabs: z.boolean()
   }),
   mcp: z.object({ instructions: z.string().trim().max(MAX_MCP_INSTRUCTIONS_CHARS) }).strict().optional(),
-  goal: z.object({
-    impulseMinutes: z.number().int().min(0).max(60).optional(),
-    includeToolCalls: z.boolean().optional(),
-      backend: z.enum(['api', 'chatgpt', 'templates']).optional(),
-      loopBackend: z.enum(['api', 'chatgpt']).optional(),
-      helperModel: z.string().trim().min(1).max(80).optional(),
-      helperReasoning: z.enum(REASONING_EFFORTS).optional(),
-    enabled: z.boolean(),
-    // Which of the two standing modes the switch runs. One field, so the renderer has no way
-    // to describe a state where Goal and Loop are both on.
-    mode: z.enum(GOAL_MODES),
-    // Which LLM endpoint Goal/Loop drafts run on, plus the custom endpoint's base URL.
-    // The URL is stored verbatim and validated at draft time (see resolveGoalBaseUrl):
-    // a shape check here would either duplicate that logic or silently rewrite the address.
-    provider: z.object({
-      kind: z.enum(GOAL_PROVIDERS),
-      baseUrl: z.string().max(2048)
-    }),
-    // An OpenRouter model id while the provider is openrouter, validated only as a shape:
-    // the catalogue changes weekly, and an allow-list here would mean this app deciding
-    // which models exist.
-    // The leading `~` is OpenRouter's own marker for an alias that always resolves to the
-    // newest model in a family — `~deepseek/deepseek-v4-flash-latest` and eleven others. The
-    // picker lists them because the listing does, so refusing them here meant the one kind
-    // of entry most worth choosing was the one kind that could not be saved.
-    // A custom endpoint names its own models (`llama3.1`, a deployment id), so while custom
-    // it is any non-empty id instead.
-    model: z.string().min(1).max(160),
-    reasoning: z.enum(GOAL_REASONING_LEVELS),
-    prompt: z.string().trim().min(1).max(MAX_GOAL_SYSTEM_PROMPT_CHARS),
-    objectivePrompt: z.string().trim().min(1).max(MAX_GOAL_SYSTEM_PROMPT_CHARS),
-    loopPrompt: z.string().trim().min(1).max(MAX_GOAL_SYSTEM_PROMPT_CHARS)
-  }).superRefine((goal, ctx) => {
-    if (goal.provider.kind !== 'custom' && !/^~?[a-z0-9._-]+\/[a-z0-9._-]+(:[a-z0-9._-]+)?$/i.test(goal.model)) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['model'],
-        message: 'Expected an OpenRouter model id like vendor/model'
-      });
-    }
-  })
 });
 
 const settingsSave = z.object({ base: settingsPatch, patch: settingsPatch }).strict();
@@ -236,7 +187,7 @@ type SettingsSnapshot = z.infer<typeof settingsPatch>;
 /**
  * Three-way merge for the renderer's settings form.
  *
- * The Chrome extension is a second writer for Goal/Auto Compact. The renderer previously sent
+ * The Chrome extension is a second writer for Auto Compact. The renderer previously sent
  * a blind full snapshot for every checkbox/theme edit, so a snapshot captured just before an
  * extension write could land just after it and silently undo that newer value. A field which is
  * unchanged between `base` and `wanted` was not edited by this renderer save and therefore keeps
@@ -279,9 +230,9 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
       chatBrowser: pick(current.ui.chatBrowser, base.ui.chatBrowser, wanted.ui.chatBrowser),
       developerMode: pick(current.ui.developerMode, base.ui.developerMode, wanted.ui.developerMode),
       finishTool: pick(current.ui.finishTool, base.ui.finishTool, wanted.ui.finishTool),
-      planBackend: pick(current.ui.planBackend, base.ui.planBackend, wanted.ui.planBackend),
-      finishAction: pick(current.ui.finishAction, base.ui.finishAction, wanted.ui.finishAction),
       finishLeadMinutes: pick(current.ui.finishLeadMinutes, base.ui.finishLeadMinutes, wanted.ui.finishLeadMinutes),
+      planModel: pick(current.ui.planModel, base.ui.planModel, wanted.ui.planModel),
+      planReasoning: pick(current.ui.planReasoning, base.ui.planReasoning, wanted.ui.planReasoning),
       backgroundChats: pick(current.ui.backgroundChats, base.ui.backgroundChats, wanted.ui.backgroundChats),
       browserOnly: pick(current.ui.browserOnly, base.ui.browserOnly, wanted.ui.browserOnly),
       autoRefreshPlugins: pick(current.ui.autoRefreshPlugins, base.ui.autoRefreshPlugins, wanted.ui.autoRefreshPlugins),
@@ -326,29 +277,6 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
         wanted.multiAgent.recoverAgentTabs
       )
     },
-    goal: {
-      impulseMinutes: pick(current.goal.impulseMinutes, base.goal.impulseMinutes, wanted.goal.impulseMinutes),
-      includeToolCalls: pick(current.goal.includeToolCalls, base.goal.includeToolCalls, wanted.goal.includeToolCalls),
-      backend: pick(current.goal.backend, base.goal.backend, wanted.goal.backend),
-      loopBackend: pick(current.goal.loopBackend, base.goal.loopBackend, wanted.goal.loopBackend),
-      helperModel: pick(current.goal.helperModel, base.goal.helperModel, wanted.goal.helperModel),
-      helperReasoning: pick(current.goal.helperReasoning, base.goal.helperReasoning, wanted.goal.helperReasoning),
-      enabled: pick(current.goal.enabled, base.goal.enabled, wanted.goal.enabled),
-      mode: pick(current.goal.mode, base.goal.mode, wanted.goal.mode),
-      provider: {
-        kind: pick(current.goal.provider.kind, base.goal.provider.kind, wanted.goal.provider.kind),
-        baseUrl: pick(current.goal.provider.baseUrl, base.goal.provider.baseUrl, wanted.goal.provider.baseUrl)
-      },
-      model: pick(current.goal.model, base.goal.model, wanted.goal.model),
-      reasoning: pick(current.goal.reasoning, base.goal.reasoning, wanted.goal.reasoning),
-      prompt: pick(current.goal.prompt, base.goal.prompt, wanted.goal.prompt),
-      objectivePrompt: pick(
-        current.goal.objectivePrompt,
-        base.goal.objectivePrompt,
-        wanted.goal.objectivePrompt
-      ),
-      loopPrompt: pick(current.goal.loopPrompt, base.goal.loopPrompt, wanted.goal.loopPrompt)
-    }
   };
 }
 
@@ -379,8 +307,6 @@ async function buildState(): Promise<AppState> {
     loginStartupAvailable: supportsLoginStartup(process.platform, app.isPackaged),
     secureStorage: await secureStorageStatus(),
     hasApiKey: await hasSecret(setupApiKeySlot(config.tunnel.profileId)),
-    hasGoalKey: await hasSecret('openRouterApiKey'),
-    hasCustomProviderKey: await hasSecret('customProviderApiKey'),
     resolvedBinary: resolvedBinary(config),
     bundledTunnelVersion: bundledVersion(),
     bridge: await bridgeStatus(),
@@ -448,13 +374,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     const before = getConfig();
     const next = await updateConfig(async config => {
       const proposed = { ...config, ...mergeSettings(config, request.base, request.patch) };
-      // If an earlier Off retirement failed, On must retry it before admission.
-      if (!config.ui.finishTool && proposed.ui.finishTool) await cancelFinishInputs(false);
-      else if (!config.goal.impulseMinutes && (proposed.goal.impulseMinutes ?? 0) > 0) await cancelFinishInputs(true);
       return proposed;
-    }, async (published, previous) => {
-      if (previous.ui.finishTool && !published.ui.finishTool) await cancelFinishInputs(false);
-      else if ((previous.goal.impulseMinutes ?? 0) > 0 && !published.goal.impulseMinutes) await cancelFinishInputs(true);
     });
     // Renderer palette changes are immediate, so keep OS/Electron-owned chrome in lock-step too.
     // Without this, selecting Dark on macOS left the title bar, menus and file picker in the
@@ -466,30 +386,6 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     // live theme switch an old opposite background otherwise flashes behind the renderer while it
     // paints again. This is also the color Electron shows during any later renderer reload/failure.
     getWindow()?.setBackgroundColor(windowBackgroundForTheme(next.ui.theme, next.ui.appearance));
-    if (
-      before.goal.enabled !== next.goal.enabled ||
-      // The mode is authority too: a draft started as a gate must not be typed after the user
-      // asked for a loop, and a loop draft must not be typed after they asked for a gate.
-      before.goal.mode !== next.goal.mode ||
-      before.goal.model !== next.goal.model ||
-      before.goal.backend !== next.goal.backend ||
-      before.goal.loopBackend !== next.goal.loopBackend ||
-      before.goal.helperModel !== next.goal.helperModel || before.goal.helperReasoning !== next.goal.helperReasoning ||
-      before.goal.provider.kind !== next.goal.provider.kind ||
-      before.goal.provider.baseUrl !== next.goal.provider.baseUrl ||
-      before.goal.reasoning !== next.goal.reasoning ||
-      before.goal.prompt !== next.goal.prompt ||
-      before.goal.objectivePrompt !== next.goal.objectivePrompt ||
-      before.goal.loopPrompt !== next.goal.loopPrompt
-    ) {
-      retireGoalDrafts(before.goal.enabled && !next.goal.enabled);
-    }
-    // The app-wide switch going off is the master stop, and has to actually stop things. Chats
-    // carry their own Goal/Loop answer now, so without this the one control that looks like it
-    // governs everything would govern only the chats that never disagreed with it — and a loop
-    // somebody wanted stopped would go on running with nowhere obvious to switch it off.
-    // Turning it *on* deliberately does not reach into a chat that has said no.
-    if (before.goal.enabled && !next.goal.enabled) clearAllGoalSwitches();
     // Explicit settings changes replace discovery's monotonic snapshot. Otherwise
     // disabled permissions/finish/session tools remain published and no schema change
     // reaches automatic plugin refresh. Cosmetic saves must not invalidate discovery.
@@ -530,7 +426,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     // snapshot failed to cross disk. Startup with the feature off restores and canonicalizes
     // that same history instead of deleting it.
     // Login registration is an independent OS preference. Cosmetic saves do not rewrite
-    // it, and its failure cannot interrupt permission publication or Goal/worker teardown.
+    // it, and its failure cannot interrupt permission publication or worker teardown.
     let loginStartupError: unknown;
     if ((before.ui.startAtLogin === true) !== (next.ui.startAtLogin === true)) {
       try { applyLoginStartup(app, next.ui.startAtLogin === true); }
@@ -717,7 +613,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       .object({
         value: z.string().max(500),
         profileId: z.string().min(1).max(64).optional(),
-        key: z.enum(['openaiApiKey', 'openRouterApiKey', 'customProviderApiKey']).default('openaiApiKey')
+        key: z.literal('openaiApiKey').default('openaiApiKey')
       })
       .parse(payload);
     if (!(await isEncryptionAvailable())) {
@@ -727,10 +623,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     const config = getConfig();
     if (key === 'openaiApiKey' && owner !== (config.tunnel.profileId ?? 'default') &&
         !config.setupProfiles?.some(profile => profile.id === owner)) throw new Error('Setup profile not found');
-    await setSecret(key === 'openaiApiKey' ? setupApiKeySlot(owner) : key, value);
-    const activeGoalKey = getConfig().goal.provider.kind === 'custom' ? 'customProviderApiKey' : 'openRouterApiKey';
-    if (key === activeGoalKey) retireGoalDrafts();
-    const what = key === 'openRouterApiKey' ? 'openrouter key' : key === 'customProviderApiKey' ? 'custom provider key' : 'api key';
+    await setSecret(setupApiKeySlot(owner), value);
+    const what = 'api key';
     logInfo(value.trim() === '' ? `${what} cleared` : `${what} stored`);
     return buildState();
   });
@@ -742,11 +636,6 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
    * is: the key that authorises it never crosses this boundary. The page size is the
    * module's own, so the renderer cannot ask for the whole catalogue in one call.
    */
-  handle('goal:models', async (payload) => {
-    const { offset } = z.object({ offset: z.number().int().min(0).max(2000).default(0) }).parse(payload ?? {});
-    return listGoalModels(offset, MODEL_PAGE_SIZE);
-  });
-
   handle('binary:pick', async () => {
     const window = getWindow();
     if (!window) throw new Error('No window');
@@ -936,31 +825,19 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     await releaseSessionFinish(id, expectedTurnId);
     return sessionControlsFor(id);
   });
-  handle('sessions:generateFinishGoal', async payload => {
-    const { id, expectedTurnId } = sessionIdArg.extend({ expectedTurnId: z.string().min(1).max(256) }).parse(payload);
-    return requestSessionFinishGoal(id, expectedTurnId);
-  });
   handle('chatModels:get', async () => getChatModels());
   handle('browser:preferences', async (payload) => requestBrowserPreferences(payload));
   handle('chatModels:request', async () => startChatModelDiscovery());
   handle('sessions:controls', async (payload) => sessionControlsFor(sessionIdArg.parse(payload).id));
-  handle('sessions:automation', async (payload) => {
-    const { id, automation, afterTurn } = sessionIdArg.extend({ automation: z.enum(['off', 'goal', 'loop']), afterTurn: z.boolean().optional() }).parse(payload);
-    return setSessionAutomation(id, automation, afterTurn);
-  });
-  handle('sessions:objective', async (payload) => {
-    const { id, text, mode } = sessionIdArg.extend({ text: z.string().max(16000), mode: z.enum(['goal', 'loop']) }).parse(payload);
-    return setSessionObjective(id, text, mode);
-  });
   handle('sessions:compact', async (payload) => compactSession(sessionIdArg.parse(payload).id));
   handle('sessions:cancelCompaction', async (payload) => cancelSessionCompaction(sessionIdArg.parse(payload).id));
   handle('sessions:plan', async (payload) => {
-    const { text, backend, requestId } = z.object({ text: z.string().trim().min(1).max(16000), backend: z.enum(['api', 'chatgpt']), requestId: z.string().uuid().optional() }).parse(payload);
+    const { text, requestId } = z.object({ text: z.string().trim().min(1).max(16000), requestId: z.string().uuid().optional() }).parse(payload);
     const publish = (progress: import('../shared/task-progress.js').TaskProgressUpdate) => {
       const target = getWindow();
       if (requestId && target && !target.isDestroyed()) target.webContents.send('task:progress', { requestId, ...progress });
     };
-    return runTaskRequest(requestId ?? randomUUID(), JSON.stringify(['plan', text, backend]), signal => draftTaskPlan(text, backend, publish, signal), publish);
+    return runTaskRequest(requestId ?? randomUUID(), JSON.stringify(['plan', text]), signal => draftTaskPlan(text, publish, signal), publish);
   });
   handle('sessions:send', async (payload) => {
     const input = inputArgs.parse(payload);
@@ -973,17 +850,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     return reorderQueuedInputs(sessionId, ids);
   });
   handle('sessions:retryBrowser', async (payload) => retryQueuedInputBrowser(z.object({ id: z.string().uuid() }).parse(payload).id));
-  handle('sessions:pausedHelpers', async () => pausedBrowserHelpers());
-  handle('sessions:retryHelper', async (payload) => {
-    const { id, sourceSessionId } = z.object({ id: z.string().uuid(), sourceSessionId: z.string().min(8).max(64) }).parse(payload);
-    return retryGoalBrowserHelper(sourceSessionId, id);
-  });
   handle('sessions:editInput', async (payload) => { const { id, text, afterTurn } = z.object({ id: z.string().uuid(), text: inputArgs.shape.text, afterTurn: z.boolean().optional() }).parse(payload); return editQueuedInput(id, text, afterTurn); });
   handle('sessions:cancelInput', async (payload) => cancelDesktopInput(z.object({ id: z.string().uuid() }).parse(payload).id));
-  handle('sessions:inputAutomation', async payload => {
-    const { id, mode, loopAfterTurn } = z.object({ id: z.string().uuid(), mode: z.enum(['off', 'goal', 'loop']), loopAfterTurn: z.boolean().optional() }).parse(payload);
-    return setInputAutomation(id, mode, loopAfterTurn);
-  });
   handle('window:getZoom', async () => (getWindow()?.webContents.getZoomFactor() ?? UI_BASE_ZOOM) / UI_BASE_ZOOM);
   handle('window:zoom', async (payload) => {
     const { factor } = z.object({ factor: z.number().min(0.75).max(1.5) }).parse(payload);
@@ -1166,41 +1034,16 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
       await wakeBrowserUrl(entry.conversationId ? `https://chatgpt.com/c/${encodeURIComponent(entry.conversationId)}`
         : `https://chatgpt.com/?${entry.lifetime === 'temporary-planner' ? 'temporary-chat=true&' : ''}${marker}#${marker}`);
     },
-    bindHelper: async (conversationId, fromSessionId) => {
-      const source = fromSessionId ? await getSession(fromSessionId) : null;
-      if (source?.conversationId === conversationId || source?.chatIds.includes(conversationId)) return;
-      await noteChatOrigin(conversationId, { kind: 'helper', fromSessionId, agentId: null, task: '' });
-    },
     changed: () => push('session:changed'),
     recordDelivered: (entry, anchorCommitted) => getConfig().sessions.record ? recordDeliveredInput(entry, anchorCommitted) : Promise.resolve(true),
     prepareText: async (entry, limits, authored) => {
-      const control = entry.conversationId ? goalSwitchFor(entry.conversationId) : getConfig().goal;
-      const mode = entry.automation ?? (control.enabled ? control.mode : 'off');
-      const text = mode === 'goal' && goalBackendFor('goal') === 'templates' && !entry.text.includes(GOAL_MARKER_INSTRUCTION)
-        ? entry.text + GOAL_MARKER_INSTRUCTION : entry.text;
+      const text = entry.text;
       // Only the opening user input owns executor setup. Existing chats, queued
       // checkpoints and automatic continuations already have their instructions.
-      return (entry.opening || !entry.sessionId) && !entry.conversationId && !entry.finishOwner && entry.mode !== 'finish'
+      return (entry.opening || !entry.sessionId) && !entry.conversationId && entry.mode !== 'finish'
         ? prepareSessionPrompt(text, entry, limits, authored)
-        : !entry.finishOwner && entry.purpose !== 'decision' ? prepareSkillFollowup(text, authored, limits, entry) : text;
+        : entry.purpose !== 'decision' ? prepareSkillFollowup(text, authored, limits, entry) : text;
     },
-    applyAutomation: async (conversationId, automation, phase, objective, loopAfterTurn) => {
-      // This message supersedes the old final; never pick that old final up merely
-      // because the composer enabled Goal for the next turn.
-      const mode = automation === 'off' ? goalSwitchFor(conversationId).mode : automation;
-      // Reserve switch ordering immediately, before awaiting another ledger write.
-      // A user Off arriving during persistence must remain later than this attempt.
-      const switchWrite = setGoalSwitchNow(conversationId, mode, automation !== 'off', loopAfterTurn);
-      const [held] = await Promise.all([switchWrite, setGoalReplyActiveNow(conversationId, false)]);
-      // A fresh chat can finish before its send ACK arrives. Its newest final is
-      // this message's own response, so it may be picked up after binding.
-      // Objective ownership transfers with delivery even if the user switched Off
-      // before the fresh chat acquired its identity. The saved Off row remains the
-      // execution authority; retaining authored text must never imply reactivation.
-      if (objective !== undefined) await setGoalObjectiveNow(conversationId, objective);
-      const live = goalSwitchFor(conversationId);
-      if (phase === 'after-send' && held.enabled && live.enabled && live.mode === held.mode) await setGoalReplyActiveNow(conversationId, true);
-    }
   });
 
   let statePushGeneration = 0;
@@ -1213,22 +1056,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   };
   onStatusChange(pushState);
   onBridgeChange(pushState);
-  // Draft stages belong to session controls; state:changed only refreshes settings.
-  onGoalChange(() => push('session:changed'));
   handle('tasks:cancel', async payload => cancelTaskRequest(z.object({ requestId: z.string().uuid() }).parse(payload).requestId));
-  handle('sessions:goalOpening', async payload => {
-    const { text, mode, requestId } = z.object({ text: z.string().trim().min(1).max(16000),
-      mode: z.enum(['goal', 'loop']), requestId: z.string().uuid() }).parse(payload);
-    const backend = goalBackendFor(mode);
-    const publish = (progress: import('../shared/task-progress.js').TaskProgressUpdate) => push('task:progress', { requestId, ...progress });
-    return runTaskRequest(requestId, JSON.stringify(['goal', text, mode]), async signal => {
-      if (goalBackendFor(mode) !== backend) throw new Error('task_settings_changed');
-      const drafted = await draftOpeningMessage(text, mode, publish, signal);
-      if ('error' in drafted) throw nativeGoalFailure(drafted.error, backend, drafted.retryAfterMs);
-      signal.throwIfAborted(); publish({ phase: 'ready', text: drafted.reply.slice(-8000) });
-      return drafted;
-    }, publish);
-  });
   configureChatModelDiscovery({ changed: () => push('chatModels:changed', getChatModels()), wake: async (nonce, allowOpen) => {
     if (!await startBridge()) throw new Error('The browser bridge could not start');
     if (allowOpen) {

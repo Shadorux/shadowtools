@@ -6,21 +6,21 @@ import { initConfigPath, defaultConfig, saveConfig } from '../src/main/config.js
 import { initDurableStore, readDurable, writeDurableNow, flushDurable, resetDurableForTests } from '../src/main/durable.js';
 import { initSessionStore, getSession, createSession, findSessionByConversation, listSessions, resetSessionStoreForTests } from '../src/main/session/store.js';
 import { enqueueInput, listInputs, pendingBrowserInputs, claimBrowserInput, authorizeBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject,
-  cancelInput, failBrowserInput, resetInputForTests, configureInputDelivery, setInputAutomation, type InputArgs, type InputEntry } from '../src/main/session/input.js';
+  cancelInput, failBrowserInput, resetInputForTests, configureInputDelivery, type InputArgs, type InputEntry } from '../src/main/session/input.js';
 import { addProject } from '../src/main/projects.js';
 import { validateNewRoot } from '../src/main/sandbox.js';
 import { makeTempDir, removeTempDir } from './helpers.js';
 
 let directory: string;
 const args = (over: Partial<InputArgs> = {}): InputArgs => ({ id: randomUUID(), sessionId: null, text: 'Independent task', mode: 'auto',
-  dueAt: Date.now(), model: 'gpt-5-6-thinking', reasoningEffort: 'high', automation: 'off', ...over });
+  dueAt: Date.now(), model: 'gpt-5-6-thinking', reasoningEffort: 'high', ...over });
 const legacy = (over: Partial<InputEntry> = {}): InputEntry => ({ ...args(), state: 'queued', owner: null,
   createdAt: Date.now(), conversationId: null, ...over });
 beforeEach(async () => {
   directory = await makeTempDir('clf-openings-');
   initConfigPath(directory); initDurableStore(directory); initSessionStore(directory); resetInputForTests();
   await saveConfig(defaultConfig());
-  configureInputDelivery({ applyAutomation: async () => {}, changed: () => {} });
+  configureInputDelivery({ changed: () => {} });
 });
 afterEach(async () => {
   vi.restoreAllMocks(); await flushDurable(); resetInputForTests(); resetSessionStoreForTests(); resetDurableForTests(); await removeTempDir(directory);
@@ -124,10 +124,9 @@ it('retains exact existing owners, exposes conflicts unbound, and never migrates
     messageId: 'native-orphan', deliveredAt: 13, historyRecorded: true });
   const helper = legacy({ text: 'Decision helper', purpose: 'decision', state: 'failed', error: 'Helper failed' });
   const checkpoint = legacy({ text: 'Later checkpoint', mode: 'finish' });
-  const generated = legacy({ text: 'Generated finish work', finishOwner: { turnId: 'turn-one', periodic: false } });
   const companion = legacy({ text: 'Companion' });
   const root = legacy({ text: 'Combined root', companionInputId: companion.id });
-  await writeDurableNow('session-input', [exact, conflicted, delivered, orphanDelivered, helper, checkpoint, generated, root, companion]);
+  await writeDurableNow('session-input', [exact, conflicted, delivered, orphanDelivered, helper, checkpoint, root, companion]);
   resetInputForTests();
 
   const rows = await listInputs();
@@ -143,7 +142,7 @@ it('retains exact existing owners, exposes conflicts unbound, and never migrates
   expect(rows.find(row => row.id === orphanDelivered.id)).toMatchObject({ sessionId: null, state: 'sent' });
   expect(rows.find(row => row.id === orphanDelivered.id)?.deliveredSessionId).toBeUndefined();
   expect(await getSession(orphanDelivered.id)).toBeNull();
-  for (const row of [helper, checkpoint, generated, root, companion]) {
+  for (const row of [helper, checkpoint, root, companion]) {
     const retained = rows.find(candidate => candidate.id === row.id)!;
     expect(retained.opening).toBeUndefined(); expect(retained.sessionId).toBeNull();
     expect(await getSession(row.id)).toBeNull();
@@ -151,7 +150,7 @@ it('retains exact existing owners, exposes conflicts unbound, and never migrates
 });
 
 it('binds an exact authorized opening before recording and acknowledges only its reserved session', async () => {
-  const row = await enqueueInput(args({ automation: 'loop', objective: 'Complete all constraints' }));
+  const row = await enqueueInput(args({ objective: 'Complete all constraints' }));
   const conversation = randomUUID();
   expect(await claimBrowserInput(row.id, 'owner', null, true)).toMatchObject({ opening: true, sessionId: row.sessionId });
   expect(await bindBrowserInputProject(row.id, 'owner', conversation)).toBe(false);
@@ -175,14 +174,6 @@ it('rejects another recording collision and never binds a cancelled unauthorized
   await claimBrowserInput(cancelled.id, 'other-owner', null, true); await cancelInput(cancelled.id);
   expect(await acknowledgeBrowserInput(cancelled.id, 'other-owner', randomUUID(), 'never-sent')).toBe(false);
   expect(await getSession(cancelled.sessionId!)).toBeNull();
-});
-
-it('keeps an unoffered opening queued past connection startup and edits only its automation', async () => {
-  const row = await enqueueInput(args()); const second = await enqueueInput(args());
-  expect(await setInputAutomation(row.id, 'loop', true)).toBe(true);
-  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
-  expect((await listInputs()).find(entry => entry.id === row.id)).toMatchObject({ state: 'queued', automation: 'loop', loopAfterTurn: true });
-  expect((await listInputs()).find(entry => entry.id === second.id)).toMatchObject({ state: 'queued', automation: 'off' });
 });
 
 it('keeps legacy canonical bytes valid after partial session creation and retry', async () => {

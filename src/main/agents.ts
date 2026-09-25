@@ -3686,7 +3686,7 @@ export function agentInfoForOwnedConversation(conversationId: string): AgentInfo
  *
  * The owner lookups above answer "who is working here", and deliberately skip a worker that
  * is over: a finished chat calling tools is not a slot. This answers the other question, the
- * one the Goal and compaction fences ask: is this a chat the loop may author in, or that a
+ * one the compaction fences ask: is this a chat the app may author in, or that a
  * Compact & Resume may be typed into? A worker chat never becomes an ordinary chat by
  * finishing. On 2026-09-03 two workers crossed the context ceiling, went terminal, and were
  * from that moment invisible to `agentForOwnedConversation()`; the auto-compaction fence read

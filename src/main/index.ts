@@ -1,6 +1,6 @@
 import { stopInputStartup } from './session/start-input.js';
 import { browserExtensionRequired } from '../shared/types.js';
-import { requestSessionFinishGoal, setFinishNotifier } from './session/finish.js';
+import { setFinishNotifier } from './session/finish.js';
 /**
  * Main process entry: window, tray, and the security posture for the renderer.
  */
@@ -46,17 +46,6 @@ import { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDura
 import { restoreRequestCorrelations } from './session/correlation.js';
 import { restoreBlockedChats } from './session/blocked-chats.js';
 import { stopComputerHelper } from './computer/index.js';
-import {
-  GOAL_OBJECTIVES_STATE,
-  GOAL_REPLIES_STATE,
-  GOAL_SWITCHES_STATE,
-  restoreGoalObjectives,
-  restoreGoalReplies,
-  restoreGoalSwitches,
-  type GoalObjectivesSnapshot,
-  type GoalRepliesSnapshot,
-  type GoalSwitchesSnapshot
-} from './goal.js';
 import {
   CONTINUATIONS_STATE,
   restoreContinuations,
@@ -215,7 +204,7 @@ function showWindow(): void {
   window.focus();
 }
 
-setFinishNotifier((title, body, sessionId, turnId) => {
+setFinishNotifier((title, body, sessionId) => {
   if (window?.isFocused() || !Notification.isSupported()) return false;
   const write = (): void => {
     showWindow();
@@ -225,13 +214,10 @@ setFinishNotifier((title, body, sessionId, turnId) => {
     if (target.isLoadingMainFrame()) target.once('did-finish-load', open); else open();
   };
   const notice = new Notification({ title, body, actions: [
-    { type: 'button', text: 'Send Automatic Goal' }, { type: 'button', text: 'Write Directly' }
+    { type: 'button', text: 'Write Directly' }
   ] });
   notice.on('click', write);
-  notice.on('action', (details) => {
-    if (details.actionIndex === 0) void requestSessionFinishGoal(sessionId, turnId).catch(error => logWarn(`Finish goal: ${error.message}`));
-    else if (details.actionIndex === 1) write();
-  });
+  notice.on('action', write);
   notice.show();
   return true;
 });
@@ -323,15 +309,6 @@ void app.whenReady().then(async () => {
   // user choice instead of Electron's default `system` theme. On macOS this controls the window
   // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
   nativeTheme.themeSource = getConfig().ui.theme;
-  const savedGoalObjectives = await readDurable<GoalObjectivesSnapshot>(GOAL_OBJECTIVES_STATE);
-  if (windowActivation.isDisabled()) return;
-  restoreGoalObjectives(savedGoalObjectives);
-  const savedGoalSwitches = await readDurable<GoalSwitchesSnapshot>(GOAL_SWITCHES_STATE);
-  if (windowActivation.isDisabled()) return;
-  restoreGoalSwitches(savedGoalSwitches);
-  const savedGoalReplies = await readDurable<GoalRepliesSnapshot>(GOAL_REPLIES_STATE);
-  if (windowActivation.isDisabled()) return;
-  restoreGoalReplies(savedGoalReplies);
   // Request ownership must exist before either side of the bridge can race in. A request id
   // that was proved yesterday remains the same workflow today even if its ChatGPT tab closed.
   await restoreRequestCorrelations();

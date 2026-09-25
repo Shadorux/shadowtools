@@ -83,15 +83,6 @@ const { createSession, getSession, initSessionStore, resetSessionStoreForTests, 
 const store = await import('../src/main/session/store.js');
 const { recordChatObservations, resetRecorderForTests, sessionForConversation } = await import('../src/main/session/recorder.js');
 const { resetWorkspaces, setWorkspaceFor, workspaceEntries } = await import('../src/main/workspace.js');
-const {
-  goalObjectiveFor,
-  goalPendingReplyFor,
-  goalSwitchFor,
-  restoreGoalReplies,
-  setGoalSwitchNow,
-  resetGoalStateForTests,
-  setGoalObjective
-} = await import('../src/main/goal.js');
 const { makeTempDir, removeTempDir, SAMPLE_BRIEF } = await import('./helpers.js');
 
 let dir: string;
@@ -131,7 +122,6 @@ beforeEach(async () => {
   resetAgentsForTests();
   resetRecorderForTests();
   resetWorkspaces();
-  resetGoalStateForTests();
   await resetSessionStoreForTests();
 });
 
@@ -407,15 +397,11 @@ describe('claiming', () => {
 });
 
 describe('committing', () => {
-  it('moves the session, its history, workspace and saved Goal objective together', async () => {
+  it('moves the session, its history and workspace together', async () => {
     const { sessionId, token } = await readyContinuation();
     const before = await sessionForConversation(CHAT_A);
     expect(before).toBe(sessionId);
     setWorkspaceFor(`chat:${CHAT_A}`, { virtual: '/workspace/project', real: dir });
-    setGoalObjective(CHAT_A, 'finish the overnight release');
-    await setGoalSwitchNow(CHAT_A, 'loop', true, true);
-    restoreGoalReplies({ version: 1, savedAt: Date.now(), replies: [{ conversationId: CHAT_A,
-      sessionId, replyId: 'source-final', turnId: 'source-turn', eventSeq: 1, acceptedAt: Date.now(), state: 'pending' }] });
     await claimContinuationNow(token, 'tab-1');
     const committedHandoffId = continuationForSession(sessionId)?.handoffId;
 
@@ -430,14 +416,8 @@ describe('committing', () => {
     expect(moved?.contextTokens).toBe(0);
     expect(await sessionForConversation(CHAT_B)).toBe(sessionId);
     expect(workspaceEntries().map((held) => held.key)).toEqual([`chat:${CHAT_B}`]);
-    expect(goalObjectiveFor(CHAT_A)).toBe('');
-    expect(goalObjectiveFor(CHAT_B)).toBe('finish the overnight release');
-    expect(goalSwitchFor(CHAT_B)).toMatchObject({ enabled: true, mode: 'loop', afterTurn: true });
-    expect(goalSwitchFor(CHAT_A).own).toBe(false);
-    expect(goalPendingReplyFor(CHAT_A)).toBeNull();
-    expect(goalPendingReplyFor(CHAT_B)).toBeNull();
     await restoreContinuations(snapshotContinuations());
-    expect(goalSwitchFor(CHAT_B)).toMatchObject({ enabled: true, mode: 'loop', afterTurn: true });
+    expect(await attachedChat(sessionId)).toBe(CHAT_B);
   });
 
   it('refuses a chat B that is not a distinct conversation', async () => {
@@ -634,9 +614,8 @@ describe('the swarm handover', () => {
     ]);
   });
 
-  it('carries the same Goal and dormant worker history through repeated overnight resumptions', async () => {
+  it('carries dormant worker history through repeated overnight resumptions', async () => {
     const summary = await createSession({ title: 'overnight chain', conversationId: CHAT_A });
-    setGoalObjective(CHAT_A, 'finish every requested release task overnight');
     startSwarm(CHAT_A);
     expect(bindConversation('worker-1', 'worker-overnight-chat')).toBe(true);
     finishAgent({ conversationId: 'worker-overnight-chat' }, 'sleep until the prime needs me again');
@@ -646,8 +625,6 @@ describe('the swarm handover', () => {
     await attachSummary(first.token, SAMPLE_BRIEF);
     await claimContinuationNow(first.token, 'replacement-tab-b');
     expect(await commitContinuation(first.token, CHAT_B)).toBe(true);
-    expect(goalObjectiveFor(CHAT_A)).toBe('');
-    expect(goalObjectiveFor(CHAT_B)).toBe('finish every requested release task overnight');
     expect(swarmStateForCaller({ conversationId: CHAT_B }).agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
       state: 'sleeping',
       revivable: true,
@@ -658,9 +635,6 @@ describe('the swarm handover', () => {
     await attachSummary(second.token, SAMPLE_BRIEF);
     await claimContinuationNow(second.token, 'replacement-tab-c');
     expect(await commitContinuation(second.token, CHAT_C)).toBe(true);
-
-    expect(goalObjectiveFor(CHAT_B)).toBe('');
-    expect(goalObjectiveFor(CHAT_C)).toBe('finish every requested release task overnight');
     expect(swarmStateForCaller({ conversationId: CHAT_A }).agents).toEqual([]);
     expect(swarmStateForCaller({ conversationId: CHAT_B }).agents).toEqual([]);
     expect(swarmStateForCaller({ conversationId: CHAT_C }).agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
@@ -677,7 +651,6 @@ describe('the swarm handover', () => {
 
   it('repairs parked worker ownership after a crash between durable session move and projection publish', async () => {
     const summary = await createSession({ title: 'parked crash recovery', conversationId: CHAT_A });
-    setGoalObjective(CHAT_A, 'keep the recovery objective attached to this work');
     spawn({
       workers: [{ task: 'reusable recovery history' }, { task: 'terminal recovery history' }],
       caller: { conversationId: CHAT_A }
@@ -704,12 +677,6 @@ describe('the swarm handover', () => {
     expect((await getSession(summary.id))?.lastCommittedResumeHandoffId).toBeNull();
     resetAgentsForTests();
     restoreSwarm(swarmSnapshot);
-    resetGoalStateForTests();
-    // This suite deliberately uses short synthetic chat ids (`chat-a`/`chat-b`) that the Goal
-    // persistence validator would reject as unlike real ChatGPT ids. Goal's own restart test
-    // covers durable decode with a valid id; seed the equivalent restored A projection here so
-    // this integration test isolates the continuation recovery move A→B.
-    setGoalObjective(CHAT_A, 'keep the recovery objective attached to this work');
     resetContinuationsForTests();
     setContinuationRecoveryHooks({ repairPrimeTransfer: repairPrimeConversationAfterRecovery });
 
@@ -728,12 +695,10 @@ describe('the swarm handover', () => {
       revivable: false,
       conversationId: 'worker-recovery-terminal'
     });
-    expect(goalObjectiveFor(CHAT_A)).toBe('');
-    expect(goalObjectiveFor(CHAT_B)).toBe('keep the recovery objective attached to this work');
     expect(swarmStateForCaller({ conversationId: CHAT_A }).agents).toEqual([]);
   });
 
-  it('carries the full sleeping and terminal worker history plus Goal through repeated overnight resumes', async () => {
+  it('carries the full sleeping and terminal worker history through repeated overnight resumes', async () => {
     const summary = await createSession({ title: 'overnight owner chain', conversationId: CHAT_A });
     spawn({
       workers: [{ task: 'reusable history' }, { task: 'terminal history' }],
@@ -745,7 +710,6 @@ describe('the swarm handover', () => {
     noteAgentContextTokens('worker-chain-terminal', WORKER_CONTEXT_CEILING_TOKENS);
     finishAgent({ conversationId: 'worker-chain-terminal' }, 'this chat is genuinely full');
     expect(releaseQuiescentRun()).toBe(true);
-    setGoalObjective(CHAT_A, 'finish the overnight release without losing any requested work');
 
     const move = async (from: string, to: string, claimant: string): Promise<void> => {
       const opened = await openContinuationNow(summary.id, from);
@@ -755,8 +719,6 @@ describe('the swarm handover', () => {
     };
 
     await move(CHAT_A, CHAT_B, 'overnight-tab-b');
-    expect(goalObjectiveFor(CHAT_A)).toBe('');
-    expect(goalObjectiveFor(CHAT_B)).toBe('finish the overnight release without losing any requested work');
     expect(swarmStateForCaller({ conversationId: CHAT_B }).agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
       state: 'sleeping',
       revivable: true,
@@ -769,8 +731,6 @@ describe('the swarm handover', () => {
     });
 
     await move(CHAT_B, CHAT_C, 'overnight-tab-c');
-    expect(goalObjectiveFor(CHAT_B)).toBe('');
-    expect(goalObjectiveFor(CHAT_C)).toBe('finish the overnight release without losing any requested work');
     const finalHistory = swarmStateForCaller({ conversationId: CHAT_C }).agents;
     expect(finalHistory.find((agent) => agent.id === 'worker-1')).toMatchObject({
       state: 'sleeping',
@@ -1294,7 +1254,6 @@ describe('the window in which a replacement chat is expected', () => {
     const from = '81818181-1111-2222-3333-444444444444';
     const to = '82828282-1111-2222-3333-444444444444';
     const source = await createSession({ title: 'prime before broken resume', conversationId: from });
-    setGoalObjective(from, 'finish the release from the replacement chat');
     setWorkspaceFor(`chat:${from}`, { virtual: '/workspace/project', real: dir });
     spawn({ workers: [{ task: 'keep the reusable worker alive' }], caller: { conversationId: from } });
     const opened = await openContinuationNow(source.id, from);
@@ -1315,22 +1274,17 @@ describe('the window in which a replacement chat is expected', () => {
     expect(await commitContinuation(opened.token, to)).toBe(false);
     abortContinuation(opened.token, 'the replacement chat already belongs to another local session');
     expect(primeConversation()).toBe(from);
-    expect(goalObjectiveFor(from)).toBe('finish the release from the replacement chat');
 
     // A random recorded conversation is not repair authority. In particular it cannot steal
-    // the objective/workspace just because some other resume attempt from A once collided.
+    // the workspace just because some other resume attempt from A once collided.
     const unrelated = '83838383-1111-2222-3333-444444444444';
     await createSession({ title: 'ordinary unrelated chat', conversationId: unrelated });
     setContinuationRecoveryHooks({ repairPrimeTransfer: repairPrimeConversationAfterRecovery });
     expect(await repairPrimeFromResumeShadow(unrelated)).toBe(false);
-    expect(goalObjectiveFor(from)).toBe('finish the release from the replacement chat');
-    expect(goalObjectiveFor(unrelated)).toBe('');
     expect(workspaceEntries().filter((held) => held.key.startsWith('chat:')).map((held) => held.key)).toEqual([`chat:${from}`]);
 
     expect(await repairPrimeFromResumeShadow(to)).toBe(true);
     expect(primeConversation()).toBe(to);
-    expect(goalObjectiveFor(from)).toBe('');
-    expect(goalObjectiveFor(to)).toBe('finish the release from the replacement chat');
     expect(workspaceEntries().filter((held) => held.key.startsWith('chat:')).map((held) => held.key)).toEqual([`chat:${to}`]);
 
     // The broker hook itself intentionally treats an already-satisfied replay as success. The
@@ -1374,12 +1328,11 @@ describe('the window in which a replacement chat is expected', () => {
     expect(primeConversation()).toBe(to);
   });
 
-  it('repairs a stranded Goal onto the current descendant of an aged-out resume shadow', async () => {
+  it('repairs a stranded workspace onto the current descendant of an aged-out resume shadow', async () => {
     const from = '85858585-1111-2222-3333-444444444444';
     const shadowChat = '86868686-1111-2222-3333-444444444444';
     const currentChat = '87878787-1111-2222-3333-444444444444';
     const source = await createSession({ title: 'source before old shadow collision', conversationId: from });
-    setGoalObjective(from, 'finish the release on the current resumed descendant');
     setWorkspaceFor(`chat:${from}`, { virtual: '/workspace/project', real: dir });
     spawn({ workers: [{ task: 'survive long enough for the old WAL to age out' }], caller: { conversationId: from } });
 
@@ -1412,16 +1365,10 @@ describe('the window in which a replacement chat is expected', () => {
     expect(await commitContinuation(descendant.token, currentChat)).toBe(true);
     expect((await getSession(shadow.id))?.chatIds).toEqual([shadowChat, currentChat]);
     expect((await getSession(shadow.id))?.origin).toMatchObject({ kind: 'resume', fromSessionId: source.id });
-    expect(goalObjectiveFor(from)).toBe('finish the release on the current resumed descendant');
-    expect(goalObjectiveFor(shadowChat)).toBe('');
-    expect(goalObjectiveFor(currentChat)).toBe('');
 
     setContinuationRecoveryHooks({ repairPrimeTransfer: repairPrimeConversationAfterRecovery });
     expect(await repairPrimeFromResumeShadow(currentChat)).toBe(true);
     expect(primeConversation()).toBe(currentChat);
-    expect(goalObjectiveFor(from)).toBe('');
-    expect(goalObjectiveFor(shadowChat)).toBe('');
-    expect(goalObjectiveFor(currentChat)).toBe('finish the release on the current resumed descendant');
     expect(workspaceEntries().filter((held) => held.key.startsWith('chat:')).map((held) => held.key)).toEqual([
       `chat:${currentChat}`
     ]);
@@ -1431,7 +1378,6 @@ describe('the window in which a replacement chat is expected', () => {
     const from = '88888888-1111-2222-3333-444444444444';
     const to = '89898989-1111-2222-3333-444444444444';
     const source = await createSession({ title: 'source with an uncommitted handoff', conversationId: from });
-    setGoalObjective(from, 'do not let an unrelated resume-looking chat steal this');
     spawn({ workers: [{ task: 'keep prime ownership available for the negative check' }], caller: { conversationId: from } });
     const broken = await openContinuationNow(source.id, from);
     await attachSummary(broken.token, SAMPLE_BRIEF);
@@ -1449,15 +1395,12 @@ describe('the window in which a replacement chat is expected', () => {
     setContinuationRecoveryHooks({ repairPrimeTransfer: repairPrimeConversationAfterRecovery });
     expect(await repairPrimeFromResumeShadow(to)).toBe(false);
     expect(primeConversation()).toBe(from);
-    expect(goalObjectiveFor(from)).toBe('do not let an unrelated resume-looking chat steal this');
-    expect(goalObjectiveFor(to)).toBe('');
   });
 
-  it('preserves newer Goal and workspace state already learned by an exact resumed descendant', async () => {
+  it('preserves newer workspace state already learned by an exact resumed descendant', async () => {
     const from = '8a8a8a8a-1111-2222-3333-444444444444';
     const to = '8b8b8b8b-1111-2222-3333-444444444444';
     const source = await createSession({ title: 'source whose old projections are stranded', conversationId: from });
-    setGoalObjective(from, 'older goal stranded on A');
     setWorkspaceFor(`chat:${from}`, { virtual: '/workspace/older', real: dir });
 
     const broken = await openContinuationNow(source.id, from);
@@ -1476,13 +1419,10 @@ describe('the window in which a replacement chat is expected', () => {
     abortContinuation(broken.token, 'the replacement chat already belongs to another local session');
 
     // The user kept working in B/C before upgrading. Late historical healing must never replace
-    // those newer target-owned choices with stale A state; it only removes A's stale projections.
-    setGoalObjective(to, 'newer goal already chosen in the resumed chat');
+    // that newer target-owned workspace with stale A state; it only removes A's stale projection.
     setWorkspaceFor(`chat:${to}`, { virtual: '/workspace/newer', real: dir });
     setContinuationRecoveryHooks({ repairPrimeTransfer: repairPrimeConversationAfterRecovery });
     expect(await repairPrimeFromResumeShadow(to)).toBe(true);
-    expect(goalObjectiveFor(from)).toBe('');
-    expect(goalObjectiveFor(to)).toBe('newer goal already chosen in the resumed chat');
     expect(workspaceEntries().filter((held) => held.key.startsWith('chat:'))).toEqual([
       { key: `chat:${to}`, virtual: '/workspace/newer' }
     ]);
@@ -1492,7 +1432,6 @@ describe('the window in which a replacement chat is expected', () => {
     const from = '8c8c8c8c-1111-2222-3333-444444444444';
     const to = '8d8d8d8d-1111-2222-3333-444444444444';
     const source = await createSession({ title: 'source with separately repaired ownership', conversationId: from });
-    setGoalObjective(from, 'goal still stranded after ownership repaired first');
     setWorkspaceFor(`chat:${from}`, { virtual: '/workspace/same-run', real: dir });
     spawn({ workers: [{ task: 'prove this is the same live run' }], caller: { conversationId: from } });
 
@@ -1512,16 +1451,13 @@ describe('the window in which a replacement chat is expected', () => {
     abortContinuation(broken.token, 'the replacement chat already belongs to another local session');
 
     // This models the exact live machine: old code/another recovery path already repaired only
-    // swarm ownership A→B/C, while Goal/workspace stayed on A. Source A is no longer an owner.
+    // swarm ownership A→B/C, while workspace stayed on A. Source A is no longer an owner.
     expect(repairPrimeConversationAfterRecovery(from, to)).toBe(true);
     expect(primeConversation()).toBe(to);
-    expect(goalObjectiveFor(from)).toBe('goal still stranded after ownership repaired first');
 
     setContinuationRecoveryHooks({ repairPrimeTransfer: repairPrimeConversationAfterRecovery });
     expect(await repairPrimeFromResumeShadow(to)).toBe(true);
     expect(primeConversation()).toBe(to);
-    expect(goalObjectiveFor(from)).toBe('');
-    expect(goalObjectiveFor(to)).toBe('goal still stranded after ownership repaired first');
     expect(workspaceEntries().filter((held) => held.key.startsWith('chat:')).map((held) => held.key)).toEqual([`chat:${to}`]);
   });
 
@@ -1529,7 +1465,6 @@ describe('the window in which a replacement chat is expected', () => {
     const from = '8e8e8e8e-1111-2222-3333-444444444444';
     const to = '8f8f8f8f-1111-2222-3333-444444444444';
     const source = await createSession({ title: 'old parked owner before shadow', conversationId: from });
-    setGoalObjective(from, 'old parked goal must stay isolated');
     setWorkspaceFor(`chat:${from}`, { virtual: '/workspace/old-owner', real: dir });
     spawn({ workers: [{ task: 'park this old owner before a fresh run starts' }], caller: { conversationId: from } });
 
@@ -1559,8 +1494,6 @@ describe('the window in which a replacement chat is expected', () => {
     expect(primeConversation()).toBe(to);
     setContinuationRecoveryHooks({ repairPrimeTransfer: repairPrimeConversationAfterRecovery });
     expect(await repairPrimeFromResumeShadow(to)).toBe(false);
-    expect(goalObjectiveFor(from)).toBe('old parked goal must stay isolated');
-    expect(goalObjectiveFor(to)).toBe('');
     // Workers now retain their exact conversation workspace while sleeping; the unrelated
     // descendant must still receive neither the old prime nor its worker workspace.
     expect(workspaceEntries().filter((held) => held.key.startsWith('chat:')).map((held) => held.key).sort()).toEqual([`chat:${from}`, 'chat:worker-old-owner'].sort());

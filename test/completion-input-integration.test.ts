@@ -26,7 +26,6 @@ const { initSessionStore, resetSessionStoreForTests } = await import('../src/mai
 const { registerIpc } = await import('../src/main/ipc.js');
 const { bridgePort, startBridge, stopBridge } = await import('../src/main/bridge.js');
 const input = await import('../src/main/session/input.js');
-const goal = await import('../src/main/goal.js');
 const { makeTempDir, removeTempDir } = await import('./helpers.js');
 let directory: string;
 let bearer: string;
@@ -51,8 +50,8 @@ beforeAll(async () => {
 beforeEach(async () => {
   await writeDurableNow('session-input', []);
   await writeDurableNow('plugin-refresh', []);
-  goal.resetGoalStateForTests(); input.resetInputForTests(); pushed.mockClear();
-  await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: false } });
+  input.resetInputForTests(); pushed.mockClear();
+  await saveConfig(defaultConfig());
 });
 afterAll(async () => {
   await stopBridge(); await flushDurable(); resetSessionStoreForTests(); resetDurableForTests();

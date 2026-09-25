@@ -16,22 +16,22 @@ beforeEach(async () => {
   directory = await makeTempDir('cos-input-retention-');
   initSessionStore(directory); initDurableStore(directory); resetInputForTests();
   record.mockReset().mockImplementation(recordDeliveredInput); vi.mocked(noteChatOrigin).mockClear();
-  configureInputDelivery({ changed: () => {}, applyAutomation: async () => {}, recordDelivered: record });
+  configureInputDelivery({ changed: () => {}, recordDelivered: record });
 });
 afterEach(async () => {
   vi.restoreAllMocks();
   resetInputForTests(); resetSessionStoreForTests(); resetDurableForTests();
   await removeTempDir(directory);
 });
-it('keeps closed-session receipts because legacy age pruning is permanently inert', async () => {
+it('prunes old closed sessions and retires their confirmed receipts', async () => {
   const session = await createSession({ title: 'Retention candidate' });
   await writeDurableNow('session-input', [receipt(session.id, { sessionId: session.id })]);
   resetSessionStoreForTests();
   const now = Date.now();
   vi.spyOn(Date, 'now').mockReturnValue(now + 32 * 24 * 60 * 60_000);
-  expect(await pruneSessions(30)).toBe(0);
-  expect((await listInputs()).map((row) => row.id)).toHaveLength(1);
-  expect((await fs.stat(path.join(directory, 'sessions', session.id))).isDirectory()).toBe(true);
+  expect(await pruneSessions(30)).toBe(1);
+  expect(await listInputs()).toEqual([]);
+  await expect(fs.stat(path.join(directory, 'sessions', session.id))).rejects.toBeDefined();
 });
 it.each(['ENOENT', 'EACCES'])('does not infer deletion when the history root is unavailable (%s)', async code => {
   const sessionId = randomUUID();

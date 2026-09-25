@@ -10,16 +10,14 @@ export function injectableAttachments(files: Array<InputImage | InputAttachment>
   return files.length > 0 && files.length <= MAX_INPUT_IMAGES && files.every(file => 'dataUrl' in file ||
     ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.mimeType));
 }
-export type InputAutomation = 'off' | 'goal' | 'loop';
-
 type InputIntent = {
   mode: string; requestedMode?: string; sessionId: string | null; opening?: boolean;
-  finishOwner?: unknown; purpose?: string; attachmentDelivery?: string;
+  purpose?: string; attachmentDelivery?: string;
 };
 /** A native upload may wait for a browser boundary while retaining immediate intent.
  * Admission and presentation must classify that same durable row identically. */
 export function manualInput(row: InputIntent): boolean {
-  return (row.requestedMode ?? row.mode) === 'auto' && !row.finishOwner && row.purpose !== 'decision' && row.attachmentDelivery !== 'tool';
+  return (row.requestedMode ?? row.mode) === 'auto' && row.purpose !== 'decision' && row.attachmentDelivery !== 'tool';
 }
 export function queuedFollowup(row: InputIntent): boolean {
   return !row.opening && !manualInput(row) &&

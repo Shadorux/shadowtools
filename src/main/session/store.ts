@@ -628,8 +628,7 @@ async function readCanonicalMessages(id: string, aliasesCollapsed?: () => void):
       out.delete(key);
     }
     out.set(firstKey, { ...latest, messageId: first.messageId, origin: first.origin ?? first.seq,
-      time: first.time, seq, turnId: group.find(([, event]) => event.turnId)?.[1].turnId,
-      ...(group.some(([, event]) => event.goalEligible === true) ? { goalEligible: true } : {}) });
+      time: first.time, seq, turnId: group.find(([, event]) => event.turnId)?.[1].turnId });
   }
   return out;
 }
@@ -970,7 +969,7 @@ function applyToSummary(summary: SessionSummary, event: SessionEvent): void {
     summary.activeTurnId = event.turnId ?? `seq-${event.seq}`;
     if (summary.finishTurn?.turnId !== summary.activeTurnId) summary.finishTurn = {
       turnId: summary.activeTurnId, conversationId: summary.conversationId, startedAt: event.time,
-      notified: false, released: false, decisionRevision: null, workSeq: 0, decisionSeq: 0, decisionInputRevision: null
+      notified: false, released: false, workSeq: 0
     };
   }
   if (event.kind === 'progress' && event.source === 'app' && event.turnId && summary.finishTurn?.turnId === event.turnId) {
@@ -978,17 +977,6 @@ function applyToSummary(summary: SessionSummary, event: SessionEvent): void {
     summary.finishTurn = finish;
     // IDs cover already-shipped event rows; new rows additionally carry typed control.
     if (event.progressId === `finish:${event.turnId}` || event.finishControl?.state === 'notified') finish.notified = true;
-    const prefix = `finish-goal:${event.turnId}:`;
-    const revision = event.finishControl?.state === 'decision' ? event.finishControl.revision
-      : event.progressId?.startsWith(prefix) ? event.progressId.slice(prefix.length) : null;
-    if (revision && /^[a-f0-9]{64}$/.test(revision) && finish.decisionRevision !== revision) {
-      finish.decisionRevision = revision;
-      finish.decisionAt = event.time;
-      finish.decisionSeq = Number.isSafeInteger(event.finishControl?.workSeq) ? event.finishControl!.workSeq! : event.seq;
-      finish.decisionInputRevision = event.finishControl?.inputRevision ?? null;
-    } else if (revision === finish.decisionRevision && event.finishControl?.state === 'decision' && Number.isSafeInteger(event.finishControl.workSeq)) {
-      finish.decisionSeq = Math.max(finish.decisionSeq, event.finishControl.workSeq!);
-    }
     if (event.finishControl) finish.conversationId = event.finishControl.conversationId;
     if (event.finishControl?.state === 'released') finish.released = true;
   }
@@ -1188,10 +1176,6 @@ export function upsertMessageEvent(
               // `final` is a compatibility mirror of state, not an independent truth.
               state: event.state === 'final' || event.final === true ? 'final' : 'streaming',
               final: event.state === 'final' || event.final === true,
-              // Goal eligibility is an accepted fact about this stable reply, not a property a
-              // later sparse page snapshot may retract. This is what makes a 503/reload replay
-              // re-offer the same durable obligation instead of silently dropping it.
-              ...(previous.goalEligible === true ? { goalEligible: true } : {}),
               // A sparse re-observation of the same prose must not throw away the richer
               // representation we already captured. If the prose itself changed, omitting
               // HTML deliberately falls back to the new plain text instead of showing stale
@@ -1254,7 +1238,6 @@ export function upsertMessageEvent(
             storedTextEqual(previous.renderedHtml, nextEvent.renderedHtml) &&
             previous.state === nextEvent.state &&
             previous.final === nextEvent.final &&
-            previous.goalEligible === nextEvent.goalEligible &&
             previous.providerMessageId === nextEvent.providerMessageId)) &&
         (nextEvent.kind !== 'user_message' || previous.kind !== 'user_message' ||
           (nextEvent.reaction === previous.reaction && nextEvent.inputId === previous.inputId && nextEvent.authoredText === previous.authoredText && nextEvent.inputDelivery === previous.inputDelivery && JSON.stringify(nextEvent.assets) === JSON.stringify(previous.assets) && JSON.stringify(nextEvent.retiredImageAssetIds) === JSON.stringify(previous.retiredImageAssetIds) && JSON.stringify(nextEvent.attachments) === JSON.stringify(previous.attachments))) &&
@@ -1340,7 +1323,7 @@ export function upsertMessageEvent(
  *
  * Metadata is canonical before preview capture starts. A later asset revision advances the
  * sequence cursor while retaining the first origin/time and never contributes completion,
- * Goal, tool-call, or activity facts. Local turn ownership may strengthen once from unknown;
+ * Tool-call and activity facts. Local turn ownership may strengthen once from unknown;
  * later document-local turn hints are ignored because reload remints them, while a conflicting
  * durable agent owner still fails closed.
  */
@@ -1757,7 +1740,7 @@ async function readRecentEventsFromDisk(
   // message to events.jsonl. This reader builds a *presentation* tail, so those revisions are
   // one logical row here just as a canonical message is one row today. Because the journal is
   // scanned newest-first, the first key seen is the latest revision; duplicates must not spend
-  // the row cap or a long old answer can hide every earlier user turn from Goal/history tails.
+  // the row cap or a long old answer can hide every earlier user turn from history tails.
   const legacyMessageKeys = new Set<string>();
   const rawTail: SessionEvent[] = [];
   const sequence = options.orderByOrigin ? positionOf : workSequence;
@@ -2091,10 +2074,8 @@ function normalizeSummary(id: string, raw: string): MetaCheckpoint | null {
     if (finish !== undefined && finish !== null && (!finish || typeof finish !== 'object' ||
         typeof finish.turnId !== 'string' || !Number.isFinite(finish.startedAt) ||
         typeof finish.notified !== 'boolean' || typeof finish.released !== 'boolean' ||
-        !Number.isSafeInteger(finish.workSeq) || finish.workSeq < 0 || !Number.isSafeInteger(finish.decisionSeq) || finish.decisionSeq < 0 ||
-        !(finish.decisionInputRevision === null || (typeof finish.decisionInputRevision === 'string' && /^[a-f0-9]{64}$/.test(finish.decisionInputRevision))) ||
-        !(finish.conversationId === null || typeof finish.conversationId === 'string') ||
-        !(finish.decisionRevision === null || /^[a-f0-9]{64}$/.test(finish.decisionRevision)))) delete publicSummary.finishTurn;
+        !Number.isSafeInteger(finish.workSeq) || finish.workSeq < 0 ||
+        !(finish.conversationId === null || typeof finish.conversationId === 'string'))) delete publicSummary.finishTurn;
 
     // A meta.json written before agents, app-opened chats or the session lineage existed
     // has no such field. A session recorded before the lineage was a single chat by
@@ -2564,7 +2545,7 @@ export async function findSessionByConversation(
  * Compact & Resume may create a new recording epoch for genuinely new user activity there, but
  * it must never restore automation authority that the successful A->B handoff retired. The
  * lineage is the durable fact: if any retained session contains A while being attached to a
- * different conversation, A is historical for browser recovery, Goal and Loop forever.
+ * different conversation, A is historical for browser recovery forever.
  */
 export async function conversationWasSuperseded(conversationId: string): Promise<boolean> {
   if (!conversationId) return false;

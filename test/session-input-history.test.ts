@@ -60,7 +60,7 @@ it('repairs a legacy off-tail image receipt across cold restore while retaining 
   await writeDurableNow('session-input', [row]);
   await flushDurable(); resetSessionStoreForTests(); initSessionStore(directory); resetInputForTests();
   const asset = vi.spyOn(store, 'writeAsset').mockRejectedValue(new Error('Session asset quota exceeded'));
-  configureInputDelivery({ recordDelivered: recordDeliveredInput, changed: () => {}, applyAutomation: async () => {} });
+  configureInputDelivery({ recordDelivered: recordDeliveredInput, changed: () => {} });
   const repaired = (await listInputs())[0]!;
   expect(repaired).toMatchObject({ historyAnchored: true, historyRecorded: false, toolImages: row.toolImages });
   expect((await readDurable<InputEntry[]>('session-input'))![0]).toMatchObject({ historyAnchored: true, historyRecorded: false });
@@ -83,7 +83,7 @@ it('leaves legacy recorded receipts and their canonical text untouched without r
   const original = (await readEvents(session.id)).find(event => event.kind === 'user_message')!;
   await writeDurableNow('session-input', [row]);
   const record = vi.fn(recordDeliveredInput);
-  configureInputDelivery({ recordDelivered: record, changed: () => {}, applyAutomation: async () => {} });
+  configureInputDelivery({ recordDelivered: record, changed: () => {} });
   expect((await listInputs())[0]).toMatchObject({ historyRecorded: true, historyAnchored: true });
   expect((await readDurable<InputEntry[]>('session-input'))![0]).toMatchObject({ historyRecorded: true, historyAnchored: true });
   await listInputs();

@@ -481,7 +481,8 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark'; appearance?:
       ...previous.ui,
       chatBrowser: $<HTMLSelectElement>('chatBrowser').value as ChatBrowser,
       finishTool: $<HTMLInputElement>('finishTool').checked,
-      planBackend: $<HTMLSelectElement>('planBackend').value as 'chatgpt' | 'api',
+      planModel: $<HTMLSelectElement>('planModel').value,
+      planReasoning: $<HTMLSelectElement>('planReasoning').value as AppState['config']['ui']['planReasoning'],
       finishLeadMinutes: Number($<HTMLSelectElement>('finishLeadMinutes').value),
       backgroundChats: $<HTMLInputElement>('backgroundChats').checked,
       autoContinue: $<HTMLInputElement>('autoContinue').checked,
@@ -527,7 +528,6 @@ async function saveSnapshot(patch: SettingsPatch, previous: AppState['config']):
     compaction: previous.compaction,
     mcp: previous.mcp ?? { instructions: '' },
     multiAgent: previous.multiAgent,
-    goal: previous.goal
   };
   const next = await run(api.saveSettings(patch, base));
   // Retire this request before repaint, while a newer queued preference still wins.
@@ -1059,7 +1059,6 @@ function apply(next: AppState): void {
   );
   applyValue($<HTMLInputElement>('binaryPath'), config.tunnel.binaryPath, previousState?.config.tunnel.binaryPath);
   applyValue($<HTMLSelectElement>('chatBrowser'), config.ui.chatBrowser ?? 'chrome', previousState?.config.ui.chatBrowser ?? 'chrome');
-  $<HTMLSelectElement>('planBackend').value = config.ui.planBackend ?? 'chatgpt';
   applyChecked($<HTMLInputElement>('finishTool'), config.ui.finishTool === true, previousState?.config.ui.finishTool);
   applyValue($<HTMLSelectElement>('finishLeadMinutes'), String(config.ui.finishLeadMinutes ?? 5), String(previousState?.config.ui.finishLeadMinutes ?? 5));
   applyChecked($<HTMLInputElement>('backgroundChats'), config.ui.backgroundChats === true, previousState?.config.ui.backgroundChats);

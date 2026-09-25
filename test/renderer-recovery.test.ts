@@ -110,9 +110,10 @@ it('reveals Pro silence at five minutes using the UI clock and hides again when 
   expect(host.lastElementChild?.textContent).toContain('Check in 1:00');
 });
 
-it.each(['queue', 'goal', 'loop'] as const)('names %s as the next step without claiming it was sent', next => {
+it('names a queued message as the next step without claiming it was sent', () => {
+  const next = 'queue' as const;
   renderRecoveryCountdowns(host, [{ kind: 'post-reload', next, deadline: 60_000 }], 0);
-  expect(host.textContent).toContain(`Reloaded · next: ${next === 'queue' ? 'Queued message' : next === 'goal' ? 'Goal' : 'Loop'}`);
+  expect(host.textContent).toContain('Reloaded · next: Queued message');
   expect(host.textContent).toContain('Check in 1:00');
 });
 

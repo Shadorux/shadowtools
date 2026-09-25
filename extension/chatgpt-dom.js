@@ -1858,8 +1858,7 @@ var CLF_DOM = (() => {
    * Puts `value` in the composer.
    *
    * `mode` says what to do with text already there: `false` refuses, `true` replaces it, and
-   * `'append'` writes after it on a new line — a stray character somebody left in the box is
-   * not a reason to hold a finished Goal reply at "sending" (2026-09-03: one letter did).
+   * `'append'` writes after it on a new line.
    */
   function insertPrompt(value, mode = false, failure = () => undefined) {
     const box = composer();
@@ -1994,8 +1993,7 @@ var CLF_DOM = (() => {
           if (unsubscribeEvidence) unsubscribeEvidence();
           if (timer !== null) clearTimeout(timer);
           // A fresh matching user row proves this text was accepted. Some provider
-          // transitions retain that same draft; leaving it lets the next Loop append
-          // to and resend the entire bootstrap. Preserve replaced editors/new drafts.
+          // transitions retain that same draft; clear the exact accepted text only.
           if (clearAcceptedDraft && value && submittedMessageObserved && stillCurrent() && composer() === box)
             clearPromptExact(submitted);
           resolve(value);

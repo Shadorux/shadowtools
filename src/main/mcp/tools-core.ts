@@ -1,6 +1,6 @@
 import { toolDeclaration } from './tool-declarations.js';
 import { registerPlanTool } from './plan-tool.js';
-import { goalWorkerChat } from '../bridge.js';
+import { managedWorkerChat } from '../bridge.js';
 import { announceSessionFinish, sessionFinishDeadline } from '../session/finish.js';
 import { getConfig } from '../config.js';
 /**
@@ -1000,7 +1000,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
       if (!getConfig().ui.finishTool) return { content: [{ type: 'text' as const, text: 'RELEASED: The user disabled finish hold. You may write your final answer.' }] };
       const caller = currentCaller();
       if (!caller.sessionId || !caller.conversationId) return failIdentity('Exact session identity is required');
-      if (goalWorkerChat(caller.conversationId)) return fail('Session finish hold is not applicable to workers or decision helpers. Workers report with agents action=finish; decision helpers answer normally.');
+      if (managedWorkerChat(caller.conversationId)) return fail('Session finish hold is not applicable to workers. Workers report with agents action=finish.');
       const deadline = sessionFinishDeadline(currentCall()?.startedAt ?? Date.now());
       return guard('session_finish', async () => ({ content: [{ type: 'text', text: await announceSessionFinish(caller.sessionId!, summary, deadline) }] }));
     });

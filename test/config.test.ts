@@ -3,7 +3,6 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  DEFAULT_GOAL_MODEL,
   defaultConfig,
   initConfigPath,
   loadConfig,
@@ -87,28 +86,17 @@ describe('settings migration', () => {
     await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, autoRefreshPlugins: true } });
     expect((await loadConfig()).ui.autoRefreshPlugins).toBe(true);
   });
-  it('defaults Goal and Loop to ChatGPT while preserving explicit backend choices', async () => {
-    expect(defaultConfig().goal).toMatchObject({ backend: 'chatgpt', loopBackend: 'chatgpt' });
-    for (const backend of ['api', 'templates', 'chatgpt'] as const) {
-      await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, backend, loopBackend: 'api' } });
-      expect((await loadConfig()).goal).toMatchObject({ backend, loopBackend: 'api' });
-    }
-  });
-  it('normalizes every writer and legacy file to recording on with no age expiry', async () => {
-    const legacy = {
+  it('preserves explicit local recording and retention choices', async () => {
+    const chosen = {
       ...defaultConfig(),
-      sessions: { ...defaultConfig().sessions, record: false, retainDays: 30 },
-      goal: { ...defaultConfig().goal, enabled: true }
+      sessions: { ...defaultConfig().sessions, record: true, retainDays: 90 }
     };
 
-    const saved = await saveConfig(legacy);
-    expect(saved.sessions).toMatchObject({ record: true, retainDays: 0 });
-    expect(saved.goal.enabled).toBe(true);
+    const saved = await saveConfig(chosen);
+    expect(saved.sessions).toMatchObject({ record: true, retainDays: 90 });
 
-    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(legacy), 'utf8');
-    const loaded = await loadConfig();
-    expect(loaded.sessions).toMatchObject({ record: true, retainDays: 0 });
-    expect(loaded.goal.enabled).toBe(true);
+    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(chosen), 'utf8');
+    expect((await loadConfig()).sessions).toMatchObject({ record: true, retainDays: 90 });
   });
 
   it('preserves old settings when new safe-default capabilities and UI prefs are added', async () => {
@@ -143,9 +131,6 @@ describe('settings migration', () => {
     expect(loaded.capabilities.create).toBe(true);
     expect(loaded.capabilities.clipboardRead).toBe(false);
     expect(loaded.capabilities.clipboardWrite).toBe(false);
-    // A config written before custom providers existed keeps OpenRouter with no URL:
-    // an upgrade never moves a running Goal loop onto an endpoint nobody chose.
-    expect(loaded.goal.provider).toEqual({ kind: 'openrouter', baseUrl: '' });
     expect(loaded.ui.autoConnect).toBe(true);
     expect(loaded.ui.privacyScreenshots).toBe(false);
     // The one tunnel id a pre-split config had is Core's, because Core is the connector
@@ -381,8 +366,8 @@ describe('shipped defaults', () => {
     platform === 'win32' || !DESKTOP_CAPABILITIES.includes(capability) ||
     (platform !== 'darwin' && (capability === 'screen' || capability === 'control'));
 
-  it('records sessions from first launch', () => {
-    expect(defaultConfig().sessions).toMatchObject({ record: true, retainDays: 0 });
+  it('keeps local session recording opt-in with bounded fresh-install retention', () => {
+    expect(defaultConfig().sessions).toMatchObject({ record: false, retainDays: 30 });
   });
 
   it('loads a genuinely missing config with every portable Core capability enabled', async () => {
@@ -439,19 +424,19 @@ describe('shipped defaults', () => {
     expect(loaded.multiAgent.enabled).toBe(false);
   });
 
-  it('does not persist obsolete recording-off or age-retention choices', async () => {
+  it('persists local recording and retention choices', async () => {
     const config = defaultConfig();
     await saveConfig({ ...config, sessions: { ...config.sessions, record: false, retainDays: 3650 } });
-    expect((await loadConfig()).sessions).toMatchObject({ record: true, retainDays: 0 });
+    expect((await loadConfig()).sessions).toMatchObject({ record: false, retainDays: 3650 });
     const stored = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
-    expect(stored.sessions).toMatchObject({ record: true, retainDays: 0 });
+    expect(stored.sessions).toMatchObject({ record: false, retainDays: 3650 });
   });
 
   it('applies the new default to a config written before the setting existed', async () => {
     const before = defaultConfig() as unknown as Record<string, unknown>;
     const { sessions: _dropped, ...withoutSessions } = before;
     await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(withoutSessions), 'utf8');
-    expect((await loadConfig()).sessions.record).toBe(true);
+    expect((await loadConfig()).sessions).toMatchObject({ record: false, retainDays: 30 });
   });
 
   /**
@@ -477,302 +462,10 @@ describe('shipped defaults', () => {
   });
 });
 
-/**
- * The goal loop's settings.
- *
- * This is the one feature in this app that types into somebody's chat without being asked
- * each time, so what it defaults to — and what a damaged config falls back to — is a
- * consent question rather than a convenience one.
- */
-describe('the goal loop settings', () => {
-  it('keeps helper settings independent from the API and preserves a chosen idle tab budget', async () => {
-    const config = defaultConfig();
-    expect(config.goal).toMatchObject({ helperModel: 'gpt-5.6-sol', helperReasoning: 'high', model: DEFAULT_GOAL_MODEL });
-    await saveConfig({ ...config, ui: { ...config.ui, tabsToKeepOpen: 7 }, goal: {
-      ...config.goal, model: 'provider/api-model', reasoning: 'low', helperModel: 'account-browser-model', helperReasoning: 'medium'
-    } });
-    const loaded = await loadConfig();
-    expect(loaded.goal).toMatchObject({ model: 'provider/api-model', reasoning: 'low', helperModel: 'account-browser-model', helperReasoning: 'medium' });
-    expect(loaded.ui.tabsToKeepOpen).toBe(7);
-  });
-  it('is off out of the box', () => {
-    const config = defaultConfig();
-    expect(config.goal.enabled).toBe(false);
-    expect(config.goal.model).toBe('z-ai/glm-5.3');
-    expect(config.goal.reasoning).toBe('default');
-    expect(config.goal.prompt).toContain('Your job is to prompt ChatGPT');
-    expect(config.goal.prompt).toContain('No separate objective is supplied');
-    // The driver ships beside the gate rather than staying hardcoded, so a fresh install has
-    // both editable instructions on disk and the settings screen has something to paint.
-    expect(config.goal.objectivePrompt).toContain('Your job is to prompt ChatGPT');
-    expect(config.goal.objectivePrompt).toContain('Read it together with the original task');
-  });
-
-  it('keeps the model, reasoning level and system prompt that were chosen', async () => {
-    const prompt = 'Custom continuation gate. Reply NO_REPLY when finished.';
-    const objectivePrompt = 'Custom goal driver. Reply NO_REPLY once the goal is reached.';
-    const loopPrompt = 'Custom loop. Always write the next message.';
-    await saveConfig({
-      ...defaultConfig(),
-      goal: {
-        ...defaultConfig().goal,
-        enabled: true,
-        mode: 'loop',
-        model: 'openai/gpt-5.2-mini:nitro',
-        reasoning: 'high',
-        prompt,
-        objectivePrompt,
-        loopPrompt
-      }
-    });
-    expect((await loadConfig()).goal).toEqual({
-      backend: 'chatgpt',
-      loopBackend: 'chatgpt',
-      includeToolCalls: false,
-      impulseMinutes: 0,
-      helperModel: 'gpt-5.6-sol',
-      helperReasoning: 'high',
-      enabled: true,
-      mode: 'loop',
-      provider: { kind: 'openrouter', baseUrl: '' },
-      model: 'openai/gpt-5.2-mini:nitro',
-      reasoning: 'high',
-      prompt,
-      objectivePrompt,
-      loopPrompt
-    });
-  });
-
-  it('upgrades only the exact previous shipped prompt and preserves customized prompts', async () => {
-    const { PREVIOUS_DEFAULT_GOAL_SYSTEM_PROMPT } = await import('../src/shared/goal.js');
-    const config = defaultConfig();
-    await fs.writeFile(
-      path.join(dir, 'config.json'),
-      JSON.stringify({ ...config, goal: { ...config.goal, prompt: PREVIOUS_DEFAULT_GOAL_SYSTEM_PROMPT } }),
-      'utf8'
-    );
-    expect((await loadConfig()).goal.prompt).toBe(defaultConfig().goal.prompt);
-
-    const customized = `${PREVIOUS_DEFAULT_GOAL_SYSTEM_PROMPT}\ncustom sentence`;
-    await fs.writeFile(
-      path.join(dir, 'config.json'),
-      JSON.stringify({ ...config, goal: { ...config.goal, prompt: customized } }),
-      'utf8'
-    );
-    expect((await loadConfig()).goal.prompt).toBe(customized);
-  });
-
-  /**
-   * Migration compares against every default ever shipped, not just the one before this.
-   *
-   * The single-predecessor check this replaced stranded anyone who had skipped a release:
-   * their untouched prompt matched neither the current default nor its immediate predecessor,
-   * so it was mistaken for a customization and kept forever.
-   */
-  it('upgrades an untouched default from any earlier version, not just the last one', async () => {
-    const { SUPERSEDED_GOAL_SYSTEM_PROMPTS } = await import('../src/shared/goal.js');
-    const config = defaultConfig();
-    for (const superseded of SUPERSEDED_GOAL_SYSTEM_PROMPTS) {
-      await fs.writeFile(
-        path.join(dir, 'config.json'),
-        JSON.stringify({ ...config, goal: { ...config.goal, prompt: superseded } }),
-        'utf8'
-      );
-      expect((await loadConfig()).goal.prompt).toBe(defaultConfig().goal.prompt);
-    }
-  });
-
-  /**
-   * The driver and the loop are persisted and editable exactly as the gate is.
-   *
-   * They were migrated by nothing at all until the requirements rewrite, so an install holding
-   * either one verbatim would have kept a superseded instruction forever while the shipped
-   * constant moved on — the same stranding the gate's list exists to prevent.
-   */
-  it('upgrades an untouched driver and loop prompt too, not only the gate', async () => {
-    const { SUPERSEDED_GOAL_OBJECTIVE_SYSTEM_PROMPTS, SUPERSEDED_GOAL_LOOP_SYSTEM_PROMPTS } =
-      await import('../src/shared/goal.js');
-    const config = defaultConfig();
-
-    for (const superseded of SUPERSEDED_GOAL_OBJECTIVE_SYSTEM_PROMPTS) {
-      await fs.writeFile(
-        path.join(dir, 'config.json'),
-        JSON.stringify({ ...config, goal: { ...config.goal, objectivePrompt: superseded } }),
-        'utf8'
-      );
-      expect((await loadConfig()).goal.objectivePrompt).toBe(defaultConfig().goal.objectivePrompt);
-    }
-
-    for (const superseded of SUPERSEDED_GOAL_LOOP_SYSTEM_PROMPTS) {
-      await fs.writeFile(
-        path.join(dir, 'config.json'),
-        JSON.stringify({ ...config, goal: { ...config.goal, loopPrompt: superseded } }),
-        'utf8'
-      );
-      expect((await loadConfig()).goal.loopPrompt).toBe(defaultConfig().goal.loopPrompt);
-    }
-  });
-
-  it('keeps a customized driver or loop prompt that merely starts like a shipped one', async () => {
-    const { SUPERSEDED_GOAL_OBJECTIVE_SYSTEM_PROMPTS, SUPERSEDED_GOAL_LOOP_SYSTEM_PROMPTS } =
-      await import('../src/shared/goal.js');
-    const config = defaultConfig();
-    const objectivePrompt = `${SUPERSEDED_GOAL_OBJECTIVE_SYSTEM_PROMPTS[0]}\ncustom sentence`;
-    const loopPrompt = `${SUPERSEDED_GOAL_LOOP_SYSTEM_PROMPTS[0]}\ncustom sentence`;
-    await fs.writeFile(
-      path.join(dir, 'config.json'),
-      JSON.stringify({ ...config, goal: { ...config.goal, objectivePrompt, loopPrompt } }),
-      'utf8'
-    );
-    const loaded = await loadConfig();
-    expect(loaded.goal.objectivePrompt).toBe(objectivePrompt);
-    expect(loaded.goal.loopPrompt).toBe(loopPrompt);
-  });
-
-  it('repairs a blank goal driver prompt to its shipped default', async () => {
-    const config = defaultConfig();
-    await fs.writeFile(
-      path.join(dir, 'config.json'),
-      JSON.stringify({ ...config, goal: { ...config.goal, objectivePrompt: '   ' } }),
-      'utf8'
-    );
-    expect((await loadConfig()).goal.objectivePrompt).toBe(defaultConfig().goal.objectivePrompt);
-  });
-
-  /**
-   * The id is free text from a provider listing that changes weekly. A config that lost it
-   * still has every root and permission in it, and losing those to a blank string would be
-   * a far worse failure than starting the picker back at its default.
-   */
-  it('repairs a blank model id rather than refusing the whole config', async () => {
-    const config = defaultConfig();
-    await fs.writeFile(
-      path.join(dir, 'config.json'),
-      JSON.stringify({ ...config, goal: { enabled: true, model: '   ', reasoning: 'low' } }),
-      'utf8'
-    );
-    const loaded = await loadConfig();
-    expect(loaded.goal.model).toBe(DEFAULT_GOAL_MODEL);
-    expect(loaded.goal.prompt).toBe(defaultConfig().goal.prompt);
-    expect(loaded.goal.enabled).toBe(true);
-    expect(loaded.roots).toEqual(config.roots);
-  });
-
-  it('defaults Goal tool context off for old configs and preserves an explicit opt-in', async () => {
-    const config = defaultConfig();
-    expect(config.goal.includeToolCalls).toBe(false);
-    const { includeToolCalls: omitted, ...oldGoal } = config.goal;
-    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({ ...config, goal: oldGoal }), 'utf8');
-    expect((await loadConfig()).goal.includeToolCalls).toBe(false);
-    await saveConfig({ ...config, goal: { ...config.goal, includeToolCalls: true } });
-    expect((await loadConfig()).goal.includeToolCalls).toBe(true);
-  });
-
-  it('adds the section to a config written before the loop existed', async () => {
-    const before = defaultConfig() as unknown as Record<string, unknown>;
-    const { goal: _dropped, ...withoutGoal } = before;
-    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(withoutGoal), 'utf8');
-    expect((await loadConfig()).goal).toEqual({
-      backend: 'chatgpt',
-      loopBackend: 'chatgpt',
-      includeToolCalls: false,
-      impulseMinutes: 0,
-      helperModel: 'gpt-5.6-sol',
-      helperReasoning: 'high',
-      enabled: false,
-      mode: 'goal',
-      provider: { kind: 'openrouter', baseUrl: '' },
-      model: DEFAULT_GOAL_MODEL,
-      reasoning: 'default',
-      prompt: defaultConfig().goal.prompt,
-      objectivePrompt: defaultConfig().goal.objectivePrompt,
-      loopPrompt: defaultConfig().goal.loopPrompt
-    });
-  });
-
-  /**
-   * Loop is the mode that cannot stop on its own, so a blank instruction here would be an
-   * unconstrained model typing into somebody's chat for ever. Repaired like the other two.
-   */
-  it('repairs a blank loop prompt rather than running the loop with no instruction', async () => {
-    const config = defaultConfig();
-    await fs.writeFile(
-      path.join(dir, 'config.json'),
-      JSON.stringify({ ...config, goal: { ...config.goal, enabled: true, mode: 'loop', loopPrompt: '   ' } }),
-      'utf8'
-    );
-    const loaded = await loadConfig();
-    expect(loaded.goal.loopPrompt).toBe(defaultConfig().goal.loopPrompt);
-    expect(loaded.goal.mode).toBe('loop');
-  });
-
-  /**
-   * The mode is one word out of a file holding every root and permission this app has. A
-   * version that knows a third mode must not cost the rest of it a trip through recovery.
-   */
-  it('repairs an unknown mode without discarding the config around it', async () => {
-    const config = defaultConfig();
-    await fs.writeFile(
-      path.join(dir, 'config.json'),
-      JSON.stringify({
-        ...config,
-        roots: [{ name: 'project', path: 'C:\\Users\\example\\project' }],
-        goal: { ...config.goal, enabled: true, mode: 'swarm' }
-      }),
-      'utf8'
-    );
-    const loaded = await loadConfig();
-    expect(loaded.goal.mode).toBe('goal');
-    expect(loaded.goal.enabled).toBe(true);
-    expect(loaded.roots).toEqual([{ name: 'project', path: 'C:\\Users\\example\\project' }]);
-  });
-
-  it('repairs a blank prompt to the safe continuation-gate default', async () => {
-    const config = defaultConfig();
-    await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({ ...config, goal: { ...config.goal, prompt: '   ' } }), 'utf8');
-    expect((await loadConfig()).goal.prompt).toBe(defaultConfig().goal.prompt);
-  });
-
-  it('repairs an invalid prompt without discarding unrelated settings', async () => {
-    const config = {
-      ...defaultConfig(),
-      roots: [{ name: 'project', path: 'C:\\Users\\example\\project' }]
-    };
-    await fs.writeFile(
-      path.join(dir, 'config.json'),
-      JSON.stringify({ ...config, goal: { ...config.goal, prompt: 'x'.repeat(20_001) } }),
-      'utf8'
-    );
-    const loaded = await loadConfig();
-    expect(loaded.goal.prompt).toBe(defaultConfig().goal.prompt);
-    expect(loaded.roots).toEqual(config.roots);
-  });
-
-  /** Corruption is not consent here either: a broken file must not switch the loop on. */
-  it('leaves the loop off when the config cannot be read', async () => {
-    await fs.writeFile(path.join(dir, 'config.json'), '{ definitely-not-json', 'utf8');
-    expect((await loadConfig()).goal.enabled).toBe(false);
-  });
-
-  /** An unknown reasoning level is somebody else's vocabulary, not a level to guess at. */
-  it('falls back rather than passing an unknown reasoning level to OpenRouter', async () => {
-    const config = defaultConfig();
-    await fs.writeFile(
-      path.join(dir, 'config.json'),
-      JSON.stringify({ ...config, goal: { enabled: true, model: 'x/y', reasoning: 'extreme' } }),
-      'utf8'
-    );
-    expect((await loadConfig()).goal.reasoning).toBe('default');
-  });
-});
-
-
-it.each(REASONING_EFFORTS)('retains canonical worker/helper effort %s across settings save and reload', async effort => {
+it.each(REASONING_EFFORTS)('retains canonical worker effort %s across settings save and reload', async effort => {
   const config = defaultConfig();
   config.multiAgent.defaultReasoning = effort;
-  config.goal.helperReasoning = effort;
   await saveConfig(config);
   const loaded = await loadConfig();
   expect(loaded.multiAgent.defaultReasoning).toBe(effort);
-  expect(loaded.goal.helperReasoning).toBe(effort);
 });

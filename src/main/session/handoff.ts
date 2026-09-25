@@ -42,7 +42,7 @@ function handoffPlanNotice(plan: AgentPlan | null): string {
  * The exact ordinary user message typed into the replacement ChatGPT conversation.
  *
  * Keep this beside the stored handoff rather than in bridge.ts: Compact & Resume has two
- * consumers of the same semantic message. The browser command types it into chat B, and Goal
+ * consumers of the same semantic message. The browser command types it into chat B, and
  * reconstructs that chat-facing conversation from the durable session after the local session
  * has been rebound. Sharing one formatter prevents those two model contexts from drifting.
  */

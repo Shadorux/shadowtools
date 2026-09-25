@@ -15,29 +15,15 @@ import {
   CAPABILITIES,
   CHAT_BROWSERS,
   DEFAULT_CAPABILITIES,
-  GOAL_MODES,
-  GOAL_PROVIDERS,
-  GOAL_REASONING_LEVELS,
   WRITE_CAPABILITIES,
   type Capabilities,
   DESKTOP_CAPABILITIES,
   type CompactionSettings,
   type Config,
-  type GoalSettings,
   type MultiAgentSettings,
   type Root,
   type SessionSettings
 } from '../shared/types.js';
-import {
-  DEFAULT_GOAL_MODEL,
-  DEFAULT_GOAL_LOOP_SYSTEM_PROMPT,
-  DEFAULT_GOAL_OBJECTIVE_SYSTEM_PROMPT,
-  DEFAULT_GOAL_SYSTEM_PROMPT,
-  MAX_GOAL_SYSTEM_PROMPT_CHARS,
-  SUPERSEDED_GOAL_LOOP_SYSTEM_PROMPTS,
-  SUPERSEDED_GOAL_OBJECTIVE_SYSTEM_PROMPTS,
-  SUPERSEDED_GOAL_SYSTEM_PROMPTS
-} from '../shared/goal.js';
 import { logError } from './logger.js';
 import { RESERVED_ROOT_NAMES } from './sandbox.js';
 import { capabilitiesForPlatform } from './platform.js';
@@ -114,47 +100,13 @@ const DEFAULT_COMPACTION: CompactionSettings = {
   auto: false,
   autoTokens: DEFAULT_SESSIONS.advisoryTokens
 };
-/**
- * The goal loop's defaults.
- *
- * Off until explicitly enabled, with ChatGPT as the default response source.
- * API provider/model settings apply only when API is selected; saved choices remain exact.
- */
-/**
- * The shipped Goal baseline. Keep the exact OpenRouter model id here rather than a provider
- * fallback or a local alias: changing providers after one failed request would also change the
- * protocol behaviour the Goal loop is validating. Existing user-selected models remain stored
- * verbatim; this value is only the fresh/repair default.
- */
-export { DEFAULT_GOAL_MODEL } from '../shared/goal.js';
-const DEFAULT_GOAL: GoalSettings = {
-  backend: 'chatgpt',
-  loopBackend: 'chatgpt',
-  impulseMinutes: 0,
-  includeToolCalls: false,
-  helperModel: 'gpt-5.6-sol',
-  helperReasoning: 'high',
-  enabled: false,
-  // The mode a fresh install runs the moment somebody flips the switch. Goal, because it is
-  // the one that can end by itself: a loop that never stops is a deliberate choice, not a
-  // default anybody should discover by turning something on.
-  mode: 'goal',
-  // Default for the optional API backend only; ChatGPT does not read this block.
-  provider: { kind: 'openrouter', baseUrl: '' },
-  model: DEFAULT_GOAL_MODEL,
-  reasoning: 'default',
-  prompt: DEFAULT_GOAL_SYSTEM_PROMPT,
-  objectivePrompt: DEFAULT_GOAL_OBJECTIVE_SYSTEM_PROMPT,
-  loopPrompt: DEFAULT_GOAL_LOOP_SYSTEM_PROMPT
-};
 // Two workers, not three: three concurrent workers reproducibly trips ChatGPT's rate limit
 // ("too many requests"), which strands the run rather than making it faster.
 const DEFAULT_MULTI_AGENT: MultiAgentSettings = {
   enabled: false,
   maxWorkers: 2,
   allowUnattributedCalls: false,
-  // Off: Goal/Loop chats are always recovered, and reopening anything else — a worker, a prime,
-  // a plain chat that once called a tool — is the user's choice to make.
+  // Off: reopening a worker or prime chat is the user's choice to make.
   recoverAgentTabs: false
 };
 /** Fresh-install exposure. Kept separate from migration defaults on purpose. */
@@ -283,9 +235,9 @@ const configSchema = z.object({
     chatBrowser: z.enum(CHAT_BROWSERS).optional().default('chrome'),
     developerMode: z.boolean().optional(),
     finishTool: z.boolean().optional(),
-    planBackend: z.enum(['chatgpt', 'api']).optional(),
-    finishAction: z.enum(['notify', 'goal']).optional(),
     finishLeadMinutes: z.number().int().min(3).max(5).optional(),
+    planModel: z.string().trim().min(1).max(80).optional().default('gpt-5.6-sol').catch('gpt-5.6-sol'),
+    planReasoning: z.enum(['', ...REASONING_EFFORTS]).optional().default('high').catch('high'),
     backgroundChats: z.boolean().optional().default(true),
     browserOnly: z.boolean().optional().default(false),
     autoRefreshPlugins: z.boolean().optional().default(false),
@@ -343,89 +295,10 @@ const configSchema = z.object({
     })
     .optional()
     .default({ ...DEFAULT_MULTI_AGENT }),
-  // An empty model id is repaired rather than rejected: the id is free text from a
-  // provider listing that changes weekly, and a config that lost it must still load with
-  // every root and permission in it intact.
-  goal: z
-    .object({
-      impulseMinutes: z.number().int().min(0).max(60).optional().default(0).catch(0),
-      includeToolCalls: z.boolean().optional().default(false),
-      enabled: z.boolean().optional().default(DEFAULT_GOAL.enabled),
-      backend: z.enum(['api', 'chatgpt', 'templates']).optional().default('chatgpt'),
-      loopBackend: z.enum(['api', 'chatgpt']).optional().default('chatgpt'),
-      helperModel: z.string().trim().min(1).max(80).optional().default('gpt-5.6-sol').catch('gpt-5.6-sol'),
-      helperReasoning: z.enum(REASONING_EFFORTS).optional().default('high').catch('high'),
-      // Repaired rather than rejected for the same reason `reasoning` below is: a config
-      // written by a version that knows one more mode than this one must not send every root
-      // and permission in the file through conservative recovery over a single word.
-      mode: z.enum(GOAL_MODES).optional().default(DEFAULT_GOAL.mode).catch(DEFAULT_GOAL.mode),
-      provider: z
-        .object({
-          // Repaired rather than rejected like `mode` above: a config written by a version
-          // that knows one more provider than this one must not invalidate every root and
-          // permission in the file over a single word.
-          kind: z.enum(GOAL_PROVIDERS).optional().default('openrouter').catch('openrouter'),
-          // Stored verbatim and validated at draft time: a URL cannot be repaired the way an
-          // enum can, and silently rewriting it would point a key at a host nobody chose.
-          baseUrl: z.string().max(2048).optional().default('')
-        })
-        .optional()
-        .default({ ...DEFAULT_GOAL.provider }),
-      model: z
-        .string()
-        .max(160)
-        .optional()
-        .default(DEFAULT_GOAL.model)
-        .transform((model) => (model.trim() === '' ? DEFAULT_GOAL.model : model.trim())),
-      // Repaired for the same reason, and one this section is specifically exposed to: the
-      // set of levels is a provider's vocabulary, so a config written by a version that
-      // knows one more of them than this one does is a config this app will meet. Rejecting
-      // it would send the whole file — every root, every permission — through conservative
-      // recovery over a word in one field nobody would miss.
-      reasoning: z
-        .enum(GOAL_REASONING_LEVELS)
-        .optional()
-        .default(DEFAULT_GOAL.reasoning)
-        .catch(DEFAULT_GOAL.reasoning),
-      // Existing configs predate the editor, and a hand-edited blank prompt must not turn
-      // Goal Mode into an unconstrained continuation model. Both adopt the strong default.
-      prompt: z
-        .string()
-        .max(MAX_GOAL_SYSTEM_PROMPT_CHARS)
-        .optional()
-        .default(DEFAULT_GOAL.prompt)
-        .transform((prompt) => (prompt.trim() === '' ? DEFAULT_GOAL.prompt : prompt.trim()))
-        .catch(DEFAULT_GOAL.prompt),
-      // Repaired exactly like `prompt` above, and for the same reason: a config predating the
-      // second editor, or hand-edited to blank, must not leave the goal driver running with no
-      // instruction at all. Both fall back to the shipped default rather than to emptiness.
-      objectivePrompt: z
-        .string()
-        .max(MAX_GOAL_SYSTEM_PROMPT_CHARS)
-        .optional()
-        .default(DEFAULT_GOAL.objectivePrompt)
-        .transform((prompt) =>
-          prompt.trim() === '' ? DEFAULT_GOAL.objectivePrompt : prompt.trim()
-        )
-        .catch(DEFAULT_GOAL.objectivePrompt),
-      // The third editor, repaired exactly like the two above. Loop is the mode that cannot
-      // stop on its own, so an empty instruction here would be an unconstrained model typing
-      // into somebody's chat forever — the one shape this section must never load in.
-      loopPrompt: z
-        .string()
-        .max(MAX_GOAL_SYSTEM_PROMPT_CHARS)
-        .optional()
-        .default(DEFAULT_GOAL.loopPrompt)
-        .transform((prompt) => (prompt.trim() === '' ? DEFAULT_GOAL.loopPrompt : prompt.trim()))
-        .catch(DEFAULT_GOAL.loopPrompt)
-    })
-    .optional()
-    .default({ ...DEFAULT_GOAL, backend: 'chatgpt', loopBackend: 'chatgpt', impulseMinutes: 0, includeToolCalls: false, helperModel: 'gpt-5.6-sol', helperReasoning: 'high' }),
   mcp: z
     .object({
-      // Repaired rather than rejected, like the Goal prompts above: this is free text a person
-      // typed, and one over-long or malformed field must not send the whole config — every
-      // root, every permission — through conservative recovery.
+      // Repaired rather than rejected: this is free text a person typed, and one over-long or
+      // malformed field must not send the whole config through conservative recovery.
       instructions: z
         .string()
         .optional()
@@ -457,11 +330,10 @@ export function defaultConfig(platform: NodeJS.Platform = process.platform, rele
     capabilities: firstLaunchCapabilities(platform, release),
     readOnly: false,
     tunnel: { kind: 'openai', tunnelId: '', desktopTunnelId: '', binaryPath: '' },
-    ui: { minimizeToTray: true, autoConnect: false, startAtLogin: false, privacyScreenshots: false, theme: 'dark', autoRefreshPlugins: false, backgroundChats: true, autoContinue: false },
+    ui: { minimizeToTray: true, autoConnect: false, startAtLogin: false, privacyScreenshots: false, theme: 'dark', autoRefreshPlugins: false, backgroundChats: true, autoContinue: false, planModel: 'gpt-5.6-sol', planReasoning: 'high' },
     sessions: { ...DEFAULT_SESSIONS },
     compaction: { ...DEFAULT_COMPACTION },
     multiAgent: { ...FIRST_LAUNCH_MULTI_AGENT },
-    goal: { ...DEFAULT_GOAL },
     mcp: { ...DEFAULT_MCP }
   };
 }
@@ -481,32 +353,7 @@ function conservativeRecoveryConfig(): Config {
     readOnly: true,
     multiAgent: { ...DEFAULT_MULTI_AGENT },
     ui: { ...defaultConfig().ui, autoContinue: false },
-    // A config file that could not be trusted is not consent to have a second model typing
-    // into the user's chat, whatever the unreadable file said.
-    goal: { ...DEFAULT_GOAL }
   };
-}
-
-/**
- * Moves any exactly-as-shipped Goal prompt, from any past version, onto the current default.
- *
- * All three prompts — the gate, the driver and the loop — are editable and persisted, so
- * changing a source constant alone would leave an existing untouched install on the old
- * behaviour forever. Exact equality is the fence: any user customization, even a one-character
- * change, is preserved verbatim. Each list is walked rather than compared against one
- * predecessor, so an install that skipped a release still migrates instead of being stranded on
- * a default two generations old.
- */
-function adoptCurrentGoalPrompt(config: Config): Config {
-  const goal = { ...config.goal };
-  if (SUPERSEDED_GOAL_SYSTEM_PROMPTS.includes(goal.prompt)) goal.prompt = DEFAULT_GOAL_SYSTEM_PROMPT;
-  if (SUPERSEDED_GOAL_OBJECTIVE_SYSTEM_PROMPTS.includes(goal.objectivePrompt)) {
-    goal.objectivePrompt = DEFAULT_GOAL_OBJECTIVE_SYSTEM_PROMPT;
-  }
-  if (SUPERSEDED_GOAL_LOOP_SYSTEM_PROMPTS.includes(goal.loopPrompt)) {
-    goal.loopPrompt = DEFAULT_GOAL_LOOP_SYSTEM_PROMPT;
-  }
-  return { ...config, goal };
 }
 
 let configPath = '';
@@ -528,7 +375,7 @@ export async function loadConfig(): Promise<Config> {
       logError('Settings file was invalid and has been reset to defaults');
       current = conservativeRecoveryConfig();
     } else {
-      current = adoptCurrentGoalPrompt(adoptWiderWindow(adoptAutoCompaction(recalibrateTokens(parsed.data))));
+      current = adoptWiderWindow(adoptAutoCompaction(recalibrateTokens(parsed.data)));
       // Duplicate root names would make a virtual path ambiguous.
       const seen = new Set<string>();
       current.roots = current.roots.filter((r) => {

@@ -1,6 +1,5 @@
 import type { WorkspaceTerminalEvent, WorkspaceTerminalInfo } from '../shared/workspace-terminal.js';
 import type { ChatModelCatalog } from '../shared/chat-models.js';
-import type { GoalModel } from '../shared/goal-reasoning.js';
 import type { TaskProgress } from '../shared/task-progress.js';
 import type { BrowserPreferences } from '../shared/browser-preferences.js';
 import type { SessionControlsView } from '../main/bridge.js';
@@ -46,16 +45,9 @@ export interface SettingsPatch {
   sessions: Config['sessions'];
   compaction: Config['compaction'];
   multiAgent: Config['multiAgent'];
-  goal: Config['goal'];
   mcp: Config['mcp'];
 }
 
-/** One page of the model catalogue, as the model picker asks for it. */
-export interface GoalModelPage {
-  models: GoalModel[];
-  total: number;
-  selectedModel?: GoalModel;
-}
 
 export interface SessionList {
   sessions: SessionSummary[];
@@ -137,11 +129,6 @@ const api = {
   addSetupProfile: (name: string) => call<AppState>('setup:profile', { action: 'add', name }),
   selectSetupProfile: (id: string) => call<AppState>('setup:profile', { action: 'select', id }),
   removeSetupProfile: (id: string) => call<AppState>('setup:profile', { action: 'remove', id }),
-  // The goal loop's own credential. Same channel, named slot; the value only ever goes in.
-  setGoalKey: (value: string) => call<AppState>('secret:set', { value, key: 'openRouterApiKey' }),
-  // The same, for a custom provider endpoint. Optional: keyless local servers need nothing stored.
-  setCustomProviderKey: (value: string) => call<AppState>('secret:set', { value, key: 'customProviderApiKey' }),
-  listGoalModels: (offset: number) => call<GoalModelPage>('goal:models', { offset }),
   pickBinary: () => call<AppState>('binary:pick'),
   connect: () => call<AppState>('connection:connect'),
   disconnect: () => call<AppState>('connection:disconnect'),
@@ -187,7 +174,6 @@ const api = {
     call<SessionDetail>('sessions:events', { id, ...options }),
   stopSessionTurn: (id: string, expectedTurnId: string) => call<SessionControlsView>('sessions:stopTurn', { id, expectedTurnId }),
   releaseSessionFinish: (id: string, expectedTurnId: string) => call<SessionControlsView>('sessions:releaseFinish', { id, expectedTurnId }),
-  generateFinishGoal: (id: string, expectedTurnId: string) => call<string>('sessions:generateFinishGoal', { id, expectedTurnId }),
   getChatModels: () => call<ChatModelCatalog>('chatModels:get'),
   browserPreferences: (patch: Partial<BrowserPreferences> = {}) => call<BrowserPreferences>('browser:preferences', patch),
   companionDiagnostics: () => call<CompanionDiagnostics | null>('bridge:diagnostics'),
@@ -203,20 +189,15 @@ const api = {
     return () => ipcRenderer.removeListener('chatModels:changed', wrapped);
   },
   getSessionControls: (id: string) => call<SessionControlsView>('sessions:controls', { id }),
-  setSessionAutomation: (id: string, automation: SessionControlsView['automation'], afterTurn?: boolean) => call<SessionControlsView>('sessions:automation', { id, automation, afterTurn }),
-  setSessionObjective: (id: string, text: string, mode: 'goal' | 'loop') => call<SessionControlsView>('sessions:objective', { id, text, mode }),
   compactSession: (id: string) => call<SessionControlsView>('sessions:compact', { id }),
   cancelSessionCompaction: (id: string) => call<SessionControlsView>('sessions:cancelCompaction', { id }),
-  draftTaskPlan: (text: string, backend: 'api' | 'chatgpt', requestId?: string) => call<string[]>('sessions:plan', { text, backend, requestId }),
+  draftTaskPlan: (text: string, requestId?: string) => call<string[]>('sessions:plan', { text, requestId }),
   sendInput: (input: InputArgs) => call<InputEntry>('sessions:send', input),
   retryInputBrowser: (id: string) => call<InputEntry | null>('sessions:retryBrowser', { id }),
   listInputs: () => call<InputEntry[]>('sessions:outbox'),
-  listPausedHelpers: () => call<Array<{ id: string; sourceSessionId: string }>>('sessions:pausedHelpers'),
-  retryHelper: (id: string, sourceSessionId: string) => call<boolean>('sessions:retryHelper', { id, sourceSessionId }),
   editQueuedInput: (id: string, text: string, afterTurn?: boolean) => call<boolean>('sessions:editInput', { id, text, afterTurn }),
   reorderQueuedInputs: (sessionId: string, ids: string[]) => call<boolean>('sessions:reorderInputs', { sessionId, ids }),
   cancelInput: (id: string) => call<boolean>('sessions:cancelInput', { id }),
-  setInputAutomation: (id: string, mode: 'off' | 'goal' | 'loop', loopAfterTurn?: boolean) => call<boolean>('sessions:inputAutomation', { id, mode, loopAfterTurn }),
   setZoom: (factor: number) => call<number>('window:zoom', { factor }),
   getZoom: () => call<number>('window:getZoom'),
   openSessionChat: (id: string) => call<boolean>('sessions:openChat', { id }),
@@ -267,8 +248,6 @@ const api = {
     return () => ipcRenderer.removeListener('task:progress', wrapped);
   },
   cancelTaskRequest: (requestId: string) => call<boolean>('tasks:cancel', { requestId }),
-  draftGoalOpening: (text: string, mode: 'goal' | 'loop', requestId: string) =>
-    call<{ reply: string; model: string }>('sessions:goalOpening', { text, mode, requestId }),
   onSwarmChanged: (listener: (state: SwarmState) => void): (() => void) => {
     const wrapped = (_event: unknown, state: SwarmState): void => listener(state);
     ipcRenderer.on('swarm:changed', wrapped);

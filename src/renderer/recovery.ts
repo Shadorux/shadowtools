@@ -14,7 +14,7 @@ export function renderRecoveryCountdowns(host: HTMLElement, countdowns: readonly
           const reason = countdown.kind === 'pickup' ? t('Waiting for delivery') : countdown.kind === 'post-reload'
             ? countdown.generating ? t('Reloaded · turn still marked generating') : t('Reloaded') :
             countdown.kind === 'thinking-failed' ? t('Thinking failed') : t('Turn still marked generating · extra wait');
-          const next = countdown.next === 'continue' ? t('Automatic Continue') : countdown.next === 'queue' ? t('Queued message') : countdown.next === 'goal' ? t('Goal') : t('Loop');
+          const next = countdown.next === 'continue' ? t('Automatic Continue') : t('Queued message');
           return t('{0} · next: {1}', [reason, next]);
         }
         return countdown.kind === 'unattributed' ? t('Unattributed call') :

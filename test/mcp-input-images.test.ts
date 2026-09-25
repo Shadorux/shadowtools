@@ -89,7 +89,7 @@ it.each([1, 7])('carries %s validated images through an exact-session MCP result
     // The last injected stage is still a tool claim until the next invocation
     // proves receipt. Finish must acknowledge it before checking for pending work.
     expect((await listInputs()).find(row => row.id === stageTwo.id)?.state).toBe('tool');
-    await saveConfig({ ...config, ui: { ...config.ui, finishTool: true, finishAction: 'notify' } });
+    await saveConfig({ ...config, ui: { ...config.ui, finishTool: true } });
     let notifications = 0;
     setFinishNotifier((_title, _body, id, turnId) => {
       notifications += 1;

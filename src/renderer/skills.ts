@@ -124,8 +124,6 @@ export function initSkills(options: Options) {
     const query = range?.query ?? '';
     const commands = options.command ? [
       { command: 'plan', name: 'Plan', description: 'Turn the next composer request into editable stages.', glyph: 'i-steps' },
-      { command: 'goal', name: 'Goal', description: 'Pursue a saved objective and stop when it is complete.', glyph: 'i-target' },
-      { command: 'loop', name: 'Loop', description: 'Keep continuing toward the saved objective.', glyph: 'i-loop' },
       { command: 'compact', name: 'Compact', description: 'Compact this chat and resume it in a fresh conversation.', glyph: 'i-copy' }
     ].filter(row => row.command.includes(query)) : [];
     choices = [...commands, ...(loading && !library ? [] : filtered(query).slice(0, 64))];

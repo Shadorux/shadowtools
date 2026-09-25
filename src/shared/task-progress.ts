@@ -34,7 +34,7 @@ function stringPrefix(source: string, start: number): { text: string; end: numbe
   return { text, end: source.length, complete: false };
 }
 
-/** Presentation only: outer Goal reply contains an escaped JSON stages array.
+/** Presentation only: the planner reply contains an escaped JSON stages array.
  * Partial stage prose is useful immediately; protocol bytes are not. This prefix
  * reader never validates, queues or authorizes a plan, and keeps no stream state.
  */

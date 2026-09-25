@@ -18,7 +18,6 @@ import { logInfo } from '../logger.js';
 import { noteChatOrigin } from './recorder.js';
 import { isAstraModel, isProModel } from '../../shared/chat-models.js';
 import { inFlightToolCalls } from '../mcp/call-context.js';
-import { automaticFinishEnabled, goalDrivingMode, consumeGoalReplyForInputNow } from '../goal.js';
 import { finishInstruction } from '../../shared/finish.js';
 import { attachmentSchema, validateInputAttachments, normalizeInputAttachments } from './input-attachments.js';
 import { MAX_CHATGPT_MESSAGE_CHARS } from '../../shared/user-prompt.js';
@@ -27,8 +26,6 @@ import { recoveryMessage, recoveryBusyMs } from '../../shared/recovery.js';
 
 export const inputArgs = z.object({
   projectId: z.string().uuid().nullable().optional(),
-  automation: z.enum(['off', 'goal', 'loop']).optional(),
-  loopAfterTurn: z.boolean().optional(),
   objective: z.string().trim().max(16000).optional(),
   /** Which existing field holds the human request, before generated workflow wrapping. */
   authoredSource: z.enum(['text', 'objective', 'none']).optional(),
@@ -63,7 +60,6 @@ const entrySchema = inputArgs.extend({
   recovery: z.object({ questionId: z.string(), episode: z.string().max(200).optional(), pro: z.boolean(), busyUntil: z.number(), phase: z.enum(['ready', 'stopping', 'reloading', 'resumed']), reloadOwner: z.string().optional() }).optional(),
   /** Exact tool-free turn this explicit browser correction may interrupt. */
   directTurn: z.object({ id: z.string().min(1).max(256), startedAt: z.number() }).optional(),
-  finishOwner: z.object({ turnId: z.string().min(1).max(256), periodic: z.boolean(), mode: z.enum(['goal', 'loop']).optional(), userRequested: z.boolean().optional() }).optional(),
   requestedMode: z.enum(['auto', 'after-turn', 'finish']).optional(),
   transportIntent: z.enum(['tool', 'browser']).optional(),
   text: z.string().min(1).max(240000),
@@ -72,7 +68,6 @@ const entrySchema = inputArgs.extend({
   companionInputId: z.string().uuid().optional(),
   purpose: z.enum(['user', 'decision']).optional(),
   lifetime: z.literal('temporary-planner').optional(),
-  decisionSourceSessionId: z.string().min(8).max(64).optional(),
   response: z.string().max(16000).optional(),
   state: z.enum(['queued', 'browser', 'tool', 'sent', 'cancelled', 'failed', 'decision']),
   offeredAt: z.number().optional(),
@@ -111,14 +106,12 @@ type InputDeliveryHooks = {
   recoveryAllowed?: (sessionId: string, conversationId: string) => boolean;
   activity?: (session: SessionSummary) => InputActivity;
   wakeDecision?: (entry: Readonly<InputEntry>, signal: AbortSignal) => Promise<void>;
-  bindHelper?: (conversationId: string, sourceSessionId: string | null) => Promise<void>;
   recordDelivered?: (entry: Readonly<InputEntry>, anchorCommitted: (seq: number) => void) => Promise<boolean>;
   prepareText?: (entry: Readonly<InputEntry>, limits: PromptLimits, authored: string) => string | Promise<string>;
-  applyAutomation: (conversationId: string, automation: NonNullable<InputArgs['automation']>, phase: 'before-send' | 'after-send', objective?: string, loopAfterTurn?: boolean) => Promise<void>;
   changed: () => void;
 };
 let deliveryHooks: InputDeliveryHooks | null = null;
-/** Installed once by IPC before bridge/MCP startup; avoids a Goal/input import cycle. */
+/** Installed once by IPC before bridge/MCP startup. */
 export function configureInputDelivery(hooks: InputDeliveryHooks): void { deliveryHooks = hooks; }
 /** One delivery policy for composer presentation, admission and the final send fence. */
 export async function sessionInputPolicy(sessionId: string, observedActivity?: InputActivity): Promise<{ queueAtFinish: boolean; canInject: boolean; injectionTurnId: string | null; directTurn: InputEntry['directTurn'] | null; browserAllowed: boolean; settled: boolean }> {
@@ -196,7 +189,7 @@ async function browserInputAllowed(entry: InputEntry): Promise<boolean> {
   // Only a never-offered ordinary input may change routes after positive terminal evidence.
   // A tool handout or ambiguous browser claim retains its original exclusive custody.
   return policy.browserAllowed && (entry.transportIntent !== 'tool' ||
-    (entry.mode === 'auto' && !entry.finishOwner && entry.purpose !== 'decision' && entry.state === 'queued' &&
+    (entry.mode === 'auto' && entry.purpose !== 'decision' && entry.state === 'queued' &&
       entry.owner === null && entry.offeredAt === undefined && policy.settled));
 }
 const inputListeners = new Set<() => void>();
@@ -252,7 +245,7 @@ function serial<T>(work: () => Promise<T>): Promise<T> {
 
 /**
  * Versions before opening reservations left ordinary New Chat rows without a sidebar owner.
- * Recover only that original authored opening: helpers, generated finish work, checkpoints and
+ * Recover only that original authored opening: helpers, staged checkpoints and
  * either half of a combined delivery keep their existing owners. A confirmed delivery may only
  * join an exact current conversation owner below; it never creates retrospective history.
  *
@@ -310,7 +303,14 @@ async function migrateLegacyOpeningOwners(current: InputEntry[]): Promise<boolea
 async function load(): Promise<InputEntry[]> {
   if (entries) return expireQueued(entries);
   const raw = await readDurable<unknown>(STATE);
-  const parsed = z.array(entrySchema).safeParse(raw ?? []);
+  const retired = Array.isArray(raw) ? raw.map((value) => {
+    if (!value || typeof value !== 'object') return value;
+    const row = value as Record<string, unknown>;
+    if (!row.finishOwner) return row;
+    return { ...row, finishOwner: undefined, automation: undefined, loopAfterTurn: undefined, state: 'cancelled',
+      error: 'Retired automatic follow-up was cancelled during migration.' };
+  }) : raw;
+  const parsed = z.array(entrySchema).safeParse(retired ?? []);
   if (!parsed.success) throw new Error('The message outbox could not be read safely');
   entries = parsed.data;
   const legacyOpeningRepair = await migrateLegacyOpeningOwners(entries);
@@ -352,7 +352,6 @@ async function load(): Promise<InputEntry[]> {
     if (!row.sessionId && row.purpose !== 'decision' && row.conversationId && row.deliveredAt !== undefined && !stamped.has(row.conversationId)) {
       await noteChatOrigin(row.conversationId, { kind: 'desktop', fromSessionId: null, agentId: null, task: '' });
     }
-    if (row.purpose === 'decision' && row.lifetime !== 'temporary-planner' && row.conversationId && !stamped.has(row.conversationId)) await deliveryHooks?.bindHelper?.(row.conversationId, row.decisionSourceSessionId ?? null);
   }
   const recovered = entries.map((row): InputEntry => row.purpose === 'decision' && !terminal(row) && !decisionWaiters.has(row.id)
     ? { ...row, state: 'cancelled' } : row);
@@ -405,8 +404,6 @@ async function expireQueued(current: InputEntry[]): Promise<InputEntry[]> {
       const reason = await recoveryInvalidReason(row);
       if (reason) return { ...row, state: 'cancelled', error: `Automatic Continue cancelled: ${reason}.` };
     }
-    if (row.finishOwner && !terminal(row) && !(await finishInputCurrent(row)))
-      return { ...row, state: 'cancelled', error: 'Automatic follow-up cancelled because its active turn or setting changed.' };
     if (row.purpose === 'decision') return row;
     if (row.state === 'queued' && row.delivery === 'tool' && row.toolTurnId) {
       const session = row.sessionId ? await getSession(row.sessionId) : null;
@@ -424,7 +421,7 @@ async function expireQueued(current: InputEntry[]): Promise<InputEntry[]> {
     // Only an ordinary browser attempt has an unclaimed startup deadline. Tool
     // intent survives a later terminal observation/restart; legacy bound-chat
     // rows are ambiguous and cannot safely be reclassified from today's activity.
-    if (row.state === 'queued' && row.mode === 'auto' && !row.opening && !row.finishOwner && !row.silenceBoundary &&
+    if (row.state === 'queued' && row.mode === 'auto' && !row.opening && !row.silenceBoundary &&
         (row.transportIntent === 'browser' || (!row.transportIntent && !row.sessionId)) &&
         Date.now() - Math.max(row.createdAt, row.dueAt) >= 60_000)
       return { ...row, state: 'failed', error: 'Not sent: the browser did not pick up this message within 60 seconds.' };
@@ -471,24 +468,6 @@ async function commit(next: InputEntry[]): Promise<void> {
   for (const listener of inputListeners) { try { listener(); } catch { /* observer only */ } }
   try { deliveryHooks?.changed(); } catch { /* a detached renderer does not undo a durable commit */ }
 }
-/** Reserve the attempt durably before crossing into Goal's control ledger. The failed
- * row is the crash tombstone: an ambiguous settings write is never replayed after a
- * later user Off. Only this live operation may replace it with the successful delivery.
- */
-async function transition(current: InputEntry[], next: InputEntry[], automated: InputEntry[], phase: 'before-send' | 'after-send'): Promise<void> {
-  if (automated.length) {
-    if (!deliveryHooks) throw new Error('Input delivery is not ready');
-    const reserved = new Map(automated.flatMap(entry => next.filter(row => sameDelivery(entry, row)).map(row => [row.id, row] as const)));
-    await commit(current.map((entry): InputEntry => {
-      const claimed = reserved.get(entry.id);
-      return claimed ? { ...claimed, state: 'failed', error: phase === 'after-send'
-        ? 'Message sent, but automation was not confirmed. Check its chat settings.'
-        : 'Automation was not confirmed; this message was not sent. Send again to retry.' } : entry;
-    }));
-    for (const entry of automated) await deliveryHooks.applyAutomation(entry.conversationId!, entry.automation!, phase, entry.objective, entry.loopAfterTurn);
-  }
-  await commit(next);
-}
 /** Freeze the exact transport bytes with its durable claim, never the authored enqueue payload. */
 async function prepare(entry: InputEntry, suffix = ''): Promise<InputEntry> {
   if (entry.purpose === 'decision') return entry;
@@ -518,7 +497,6 @@ function append(current: InputEntry[], entry: InputEntry, stackDirect = false): 
   }
   // Admission is per durable session. Native composer custody stays with each claim.
   if (!stackDirect && entry.purpose !== 'decision' && !queuedFollowup(entry) && current.some(row => row.sessionId === entry.sessionId && row.purpose !== 'decision' &&
-      !(!entry.finishOwner && row.finishOwner && row.state === 'tool') &&
       (!queuedFollowup(row) || row.state === 'browser') && ['queued', 'browser', 'tool'].includes(row.state))) {
     throw new Error('One message is already awaiting delivery. Cancel it before sending another.');
   }
@@ -554,19 +532,6 @@ async function target(entry: InputEntry): Promise<string | null> {
   if (isChatBlocked(session.conversationId)) throw new Error('Unblock this conversation before sending');
   return session.conversationId;
 }
-async function finishInputCurrent(entry: InputEntry): Promise<boolean> {
-  // Periodic generation was retired; persisted rows cannot regain delivery authority.
-  if (!entry.finishOwner || entry.finishOwner.periodic || !entry.sessionId) return false;
-  const session = await getSession(entry.sessionId), config = getConfig();
-  return !!session?.conversationId && session.conversationId === entry.conversationId &&
-    session.activeTurnId === entry.finishOwner.turnId && session.finishTurn?.turnId === entry.finishOwner.turnId &&
-    !session.finishTurn.released && config.ui.finishTool === true && !isChatBlocked(session.conversationId) &&
-    session.origin?.kind !== 'worker' && session.origin?.kind !== 'helper' &&
-    // Earlier finish decisions always used Loop. A mode change cannot deliver
-    // either a legacy Loop instruction or a newly drafted decision for the old mode.
-    (entry.finishOwner.mode ?? 'loop') === goalDrivingMode(session.conversationId) &&
-    (entry.finishOwner.userRequested === true || automaticFinishEnabled(session.conversationId));
-}
 /** The accepted outbox identity repairs a partially materialized session after restart. */
 async function materializeOpening(entry: InputEntry): Promise<void> {
   if (!entry.opening || !entry.sessionId) return;
@@ -581,7 +546,7 @@ async function materializeOpening(entry: InputEntry): Promise<void> {
     throw new Error('Reserved opening session belongs to another ChatGPT conversation');
   if (entry.projectId && session.projectId !== entry.projectId) await assignSessionProject(session.id, entry.projectId);
 }
-export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwner']): Promise<InputEntry> {
+export function enqueueInput(raw: InputArgs): Promise<InputEntry> {
   return serial(async () => {
     const input = inputArgs.parse(raw);
     if (input.stages !== undefined && JSON.stringify([input.text, ...input.stages]).length > 12000)
@@ -613,7 +578,7 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
     const toolDelivery = input.delivery === 'tool' || input.attachmentDelivery === 'tool';
     if (toolDelivery) {
       const turnId = policy?.directTurn?.id ?? policy?.injectionTurnId;
-      if (!input.sessionId || input.mode !== 'auto' || finishOwner || input.stages?.length || !turnId ||
+      if (!input.sessionId || input.mode !== 'auto' || input.stages?.length || !turnId ||
           (input.images?.length ?? 0) + (input.attachments?.length ?? 0) > MAX_INPUT_IMAGES)
         throw new Error(`Inject up to ${MAX_INPUT_IMAGES} images into an active chat; otherwise use Send or After this turn`);
       const owner = await getSession(input.sessionId);
@@ -623,7 +588,6 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
     } else if (input.attachments?.length) {
       await validateInputAttachments(input.attachments);
       // Native files belong to the next browser message, never a tool-result injection.
-      if (finishOwner) throw new Error('Automatic finish messages cannot attach files');
       if (input.mode === 'finish' || (input.mode === 'auto' && (policy?.canInject || policy?.directTurn))) input.mode = 'after-turn';
     } else if (input.mode === 'after-turn' && policy?.queueAtFinish) input.mode = 'finish';
     if (input.mode === 'finish' || input.stages?.length) {
@@ -632,12 +596,12 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
     }
     // Unattributed work can fence browser Send without making this chat a tool recipient.
     // Leave that input neutral until the existing serialized claim selects a safe transport.
-    const transportIntent = toolDelivery ? 'tool' as const : input.attachments?.length ? 'browser' as const : input.mode === 'auto' && !finishOwner
+    const transportIntent = toolDelivery ? 'tool' as const : input.attachments?.length ? 'browser' as const : input.mode === 'auto'
       ? policy?.canInject ? 'tool' as const : !policy || policy.browserAllowed || policy.directTurn ? 'browser' as const : undefined : undefined;
-    const directTurn = !toolDelivery && input.mode === 'auto' && !finishOwner && input.dueAt <= Date.now() ? policy?.directTurn : null;
+    const directTurn = !toolDelivery && input.mode === 'auto' && input.dueAt <= Date.now() ? policy?.directTurn : null;
     const entry: InputEntry = { ...input, ...(queuedTurn ? { queuedTurn } : {}), ...(toolImages ? { toolImages } : {}), ...(directTurn ? { directTurn } : {}),
       ...(injectionOwner ? { toolTurnId: injectionOwner.turnId } : {}), ...(transportIntent ? { transportIntent } : {}),
-      ...(requestedMode !== input.mode ? { requestedMode } : {}), ...(finishOwner ? { finishOwner } : {}), state: 'queued', owner: null, createdAt: Date.now(), conversationId: null };
+      ...(requestedMode !== input.mode ? { requestedMode } : {}), state: 'queued', owner: null, createdAt: Date.now(), conversationId: null };
     if (input.projectId) {
       await projectWorkspace(input.projectId);
       if (input.sessionId) {
@@ -652,7 +616,6 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
       entry.opening = true;
       entry.sessionId = input.id;
     }
-    if (finishOwner && !(await finishInputCurrent(entry))) throw new Error('The automatic follow-up no longer belongs to an active turn');
     if (injectionOwner) {
       policy = await sessionInputPolicy(input.sessionId!);
       const owner = await getSession(input.sessionId!);
@@ -664,10 +627,9 @@ export function enqueueInput(raw: InputArgs, finishOwner?: InputEntry['finishOwn
     }
     // User input supersedes only automatic work that has never been handed out.
     // Offered tool receipts retain their identity until a later request proves receipt.
-    const prioritized = !finishOwner ? current.map(row => row.sessionId === entry.sessionId &&
-      ((row.finishOwner && row.state === 'queued') || (row.recovery && !terminal(row) && row.sendAuthorizedAt === undefined))
-      ? { ...row, state: 'cancelled' as const, error: 'Replaced by your new instruction before delivery.' } : row) : current;
-    let next = append(prioritized, entry, input.mode === 'auto' && !finishOwner && policy?.canInject === true);
+    const prioritized = current.map(row => row.sessionId === entry.sessionId && row.recovery && !terminal(row) && row.sendAuthorizedAt === undefined
+      ? { ...row, state: 'cancelled' as const, error: 'Replaced by your new instruction before delivery.' } : row);
+    let next = append(prioritized, entry, input.mode === 'auto' && policy?.canInject === true);
     // A finish plan belongs to an existing session now. Publish every editable
     // checkpoint atomically; no composer text or first-send receipt owns its life.
     if (entry.mode === 'finish') next = materializeStages(next, entry);
@@ -746,7 +708,7 @@ export function cancelInput(id: string): Promise<boolean> {
         ? 'Not sent: this delivery was cancelled before Send was authorized.'
         : 'Cancelled locally. Delivery to ChatGPT is unconfirmed; the message may already have been sent.'
         : found.state === 'queued' ? undefined : entry.error } : entry));
-    decisionWaiters.get(id)?.reject(new Error('goal_browser_cancelled'));
+    decisionWaiters.get(id)?.reject(new Error('decision_browser_cancelled'));
     decisionWaiters.delete(id);
     await removeWithdrawnOpening(entries!.find(row => row.id === found.id)!, entries!);
     return true;
@@ -805,18 +767,6 @@ export function reorderQueuedInputs(sessionId: string, ids: string[]): Promise<b
   });
 }
 
-/** Called inside the existing serialized settings transaction after publishing Off
- * and before re-enabling On (also recovering a failed earlier retirement).
- * A later On cannot revive these durable cancellations, even across restart. */
-export function cancelFinishInputs(periodicOnly: boolean): Promise<void> {
-  return serial(async () => {
-    const current = await load();
-    const next = current.map(row => row.finishOwner && (!periodicOnly || row.finishOwner.periodic) && !terminal(row)
-      ? { ...row, state: 'cancelled' as const, error: 'Automatic follow-up cancelled by settings. Already offered input may have reached ChatGPT.' } : row);
-    if (next.some((row, index) => row !== current[index])) await commit(next);
-  });
-}
-
 export function editQueuedInput(id: string, text: string, afterTurn?: boolean): Promise<boolean> {
   return serial(async () => {
     const value = inputArgs.shape.text.parse(text);
@@ -845,34 +795,7 @@ export function authorizeBrowserInput(id: string, owner: string, conversationId:
     // Recorder work is serialized independently and can arrive during the durable
     // claim write. Keep the spent claim, but never publish stale Send permission.
     if (row.recovery && !await recoveryCurrent(row)) return false;
-    if (row.completedTurnId && row.sessionId && conversationId)
-      await consumeGoalReplyForInputNow(conversationId, row.sessionId, row.completedTurnId);
     return !row.recovery || await recoveryCurrent(row);
-  });
-}
-/** The same outbox serialization owns mode changes and browser ACK. A late ACK
- * must observe Off; an ACK that won first is followed by the exact bound-chat Off. */
-export function setInputAutomation(id: string, automation: NonNullable<InputArgs['automation']>, loopAfterTurn?: boolean): Promise<boolean> {
-  return serial(async () => {
-    const mode = z.enum(['off', 'goal', 'loop']).parse(automation);
-    const delivery = z.boolean().optional().parse(loopAfterTurn);
-    const current = await load();
-    const entry = current.find(row => row.id === id && row.purpose !== 'decision' && ['queued', 'browser', 'sent', 'tool'].includes(row.state));
-    if (!entry) return false;
-    const conversationId = entry.conversationId;
-    if (conversationId && await conversationWasSuperseded(conversationId)) return false;
-    const sessionId = entry.sessionId ?? entry.deliveredSessionId;
-    if (sessionId && (await getSession(sessionId))?.conversationId !== conversationId) return false;
-    await commit(current.map(row => row === entry ? { ...row, automation: mode,
-      ...(delivery === undefined ? {} : { loopAfterTurn: delivery }) } : row));
-    if (conversationId && (mode === 'off' || entry.state !== 'queued')) {
-      if (!deliveryHooks) throw new Error('Input delivery is not ready');
-      // Mode changes preserve the chat's current objective. Only the delivery
-      // transition transfers the opening text; an old outbox row must not overwrite
-      // an objective the user edited after this message was delivered.
-      await deliveryHooks.applyAutomation(conversationId, mode, entry.state === 'sent' ? 'after-send' : 'before-send', undefined, delivery);
-    }
-    return true;
   });
 }
 export function noteInputStartupError(id: string, error: string | null): Promise<InputEntry | null> {
@@ -983,17 +906,6 @@ export function pendingQueuedPickups(): Promise<Array<{ conversationId: string; 
 function consumedTurn(row: InputEntry, turnId: string): boolean {
   return row.completedTurnId === turnId &&
     (row.sendAuthorizedAt !== undefined || row.deliveredAt !== undefined || row.requiresAuthorization === false);
-}
-
-/** The visible outbox precedes automatic Goal work, including an ineligible head.
- * A spent completion also belongs to its user input after that row leaves the queue. */
-export function inputBeforeGoal(sessionId: string, sourceTurnId?: string): Promise<'queued' | 'consumed' | null> {
-  return serial(async () => {
-    const rows = await load();
-    if (rows.some(row => row.sessionId === sessionId && row.purpose !== 'decision' &&
-      ['queued', 'browser', 'tool'].includes(row.state))) return 'queued';
-    return sourceTurnId && rows.some(row => row.sessionId === sessionId && consumedTurn(row, sourceTurnId)) ? 'consumed' : null;
-  });
 }
 
 /** A native-only queue head needs the held answer to finish before it can send. */
@@ -1252,7 +1164,7 @@ export function claimBrowserInput(id: string, owner: string, conversationId: str
       await turnHasMcpCall(session.id, entry.silenceBoundary.conversationId, entry.silenceBoundary.turnId)
       ? ordered(current).find(row => row.sessionId === entry.sessionId && queuedFollowup(row) && row.state === 'queued') : undefined;
     let companion = entry.companionInputId ? current.find(row => row.id === entry.companionInputId)
-      : queueHead && session && queuedAfterTurn(queueHead, session) && !queueHead.finishOwner && queueHead.purpose !== 'decision' && queueHead.attachmentDelivery !== 'tool' ? queueHead : undefined;
+      : queueHead && session && queuedAfterTurn(queueHead, session) && queueHead.purpose !== 'decision' && queueHead.attachmentDelivery !== 'tool' ? queueHead : undefined;
     if (entry.companionInputId && (!companion || companion.state !== 'browser' || companion.owner !== entry.owner || companion.sessionId !== entry.sessionId)) return null;
     // An optional checkpoint cannot make an otherwise deliverable correction too
     // large. Leave that exact head queued; never skip it to collect a later one.
@@ -1286,11 +1198,8 @@ export function claimBrowserInput(id: string, owner: string, conversationId: str
         ? { ...entry, state: 'failed', error: (error as Error).message.slice(0, 200) } : row));
       throw error;
     }
-    await transition(current, current.map((row) => row === entry ? claimed : row === companion ? { ...row,
-      state: 'browser', owner, conversationId, offeredAt: claimed.offeredAt, requiresAuthorization, completedTurnId: claimed.completedTurnId } : row),
-      entry.state === 'queued' && entry.automation && conversationId && entry.purpose !== 'decision' ? [claimed] : [], 'before-send');
-    if (!requiresAuthorization && completedTurnId && entry.sessionId && conversationId)
-      await consumeGoalReplyForInputNow(conversationId, entry.sessionId, completedTurnId);
+    await commit(current.map((row) => row === entry ? claimed : row === companion ? { ...row,
+      state: 'browser', owner, conversationId, offeredAt: claimed.offeredAt, requiresAuthorization, completedTurnId: claimed.completedTurnId } : row));
     logInfo(`input ${id}: browser claimed after ${Math.max(0, Date.now() - entry.createdAt)} ms`);
     return { ...combinedInput(claimed, companion), ...selection, text: claimed.deliveryText ?? claimed.text };
   });
@@ -1354,17 +1263,13 @@ export function acknowledgeBrowserInput(id: string, owner: string, conversationI
     }
     const delivered = entry.sessionId ? await getSession(entry.sessionId) : deliveredConversation
       ? await findSessionByConversation(deliveredConversation, { requireUnique: true }) : null;
-    if (entry.purpose === 'decision' && entry.lifetime !== 'temporary-planner' && deliveredConversation) await deliveryHooks?.bindHelper?.(deliveredConversation, entry.decisionSourceSessionId ?? null);
     const acknowledged: InputEntry = { ...entry, conversationId: deliveredConversation,
       deliveredSessionId: delivered?.id ?? null, state: entry.state === 'cancelled' ? 'cancelled' : entry.purpose === 'decision' ? 'decision' : 'sent',
       ...(entry.state === 'cancelled' ? { error: 'Cancelled locally; delivery was later confirmed in ChatGPT.' } : {}),
       ...(messageId ? { messageId } : {}), deliveredAt: Date.now() };
-    await transition(current, current.map((row) => row === entry ? acknowledged : row.id === entry.companionInputId ? { ...row,
+    await commit(current.map((row) => row === entry ? acknowledged : row.id === entry.companionInputId ? { ...row,
       state: acknowledged.state, error: acknowledged.error, deliveredSessionId: acknowledged.deliveredSessionId,
-      messageId: acknowledged.messageId, deliveredAt: acknowledged.deliveredAt } : row),
-      entry.state !== 'cancelled' && (entry.opening || !entry.sessionId) && entry.automation && deliveredConversation && entry.purpose !== 'decision' ? [acknowledged] : [], 'after-send');
-    if (entry.completedTurnId && entry.sessionId && deliveredConversation)
-      await consumeGoalReplyForInputNow(deliveredConversation, entry.sessionId, entry.completedTurnId);
+      messageId: acknowledged.messageId, deliveredAt: acknowledged.deliveredAt } : row));
     logInfo(`input ${id}: browser acknowledged after ${Math.max(0, Date.now() - entry.createdAt)} ms`);
     await publishHistory();
     return true;
@@ -1424,7 +1329,7 @@ export function offerToolInput(sessionId: string | null | undefined, conversatio
       // the actual invocation start, never a change in that grouping id.
       const received = toolInputReceipt(entry, sessionId, conversationId, startedAt);
       if (received !== entry) return received;
-      if (payloadFull || (inputTaken && (entry.mode === 'finish' || entry.finishOwner)) || (entry.finishOwner && entry.createdAt >= startedAt)) return entry;
+      if (payloadFull || (inputTaken && entry.mode === 'finish')) return entry;
       if (entry.mode === 'finish' && !finishBoundary) return entry;
       if (entry.mode === 'finish' && entry !== head) return entry;
       // After-turn tasks own a future browser turn; they cannot block an explicit
@@ -1451,11 +1356,8 @@ export function offerToolInput(sessionId: string | null | undefined, conversatio
       return entry;
     };
     const next: InputEntry[] = [];
-    for (const entry of ordered(current).sort((a, b) => Number(a.mode === 'finish' || !!a.finishOwner) - Number(b.mode === 'finish' || !!b.finishOwner))) next.push(await prepareEntry(entry));
-    if (next.some((entry, index) => entry !== current[index])) {
-      const automated = next.filter((entry) => entry.state === 'tool' && entry.automation && current.some((row) => row.id === entry.id && row.state === 'queued'));
-      await transition(current, next, automated, 'before-send');
-    }
+    for (const entry of ordered(current).sort((a, b) => Number(a.mode === 'finish') - Number(b.mode === 'finish'))) next.push(await prepareEntry(entry));
+    if (next.some((entry, index) => entry !== current[index])) await commit(next);
     for (const id of delivered) if (!offered.has(id)) offered.set(id, Date.now());
     for (const entry of next) if (terminal(entry)) offered.delete(entry.id);
     await publishHistory();
@@ -1464,24 +1366,6 @@ export function offerToolInput(sessionId: string | null | undefined, conversatio
 }
 
 export function resetInputForTests(): void { entries = null; chain = Promise.resolve(); offered.clear(); decisionWaiters.clear(); }
-
-export async function pausedBrowserHelpers(): Promise<Array<{ id: string; sourceSessionId: string }>> {
-  return (await listInputs()).filter(row => row.purpose === 'decision' && row.state === 'cancelled' && !row.conversationId && row.decisionSourceSessionId)
-    .map(row => ({ id: row.id, sourceSessionId: row.decisionSourceSessionId! }));
-}
-
-/** A deliberate user action withdraws exactly one ambiguous attempt's retry fence.
- * Its old owner remains terminal forever; this never replays the previous send. */
-export function authorizeBrowserHelperRetry(id: string, sourceSessionId: string): Promise<boolean> {
-  return serial(async () => {
-    const current = await load();
-    const row = current.find(entry => entry.id === id && entry.decisionSourceSessionId === sourceSessionId
-      && entry.purpose === 'decision' && entry.state === 'cancelled' && !entry.conversationId);
-    if (!row || current.some(entry => entry.decisionSourceSessionId === sourceSessionId && !terminal(entry))) return false;
-    await commit(current.map(entry => entry === row ? { ...entry, state: 'failed', error: 'User authorized a new helper' } : entry));
-    return true;
-  });
-}
 
 /** Only a pre-send failure can be declared failed. An ambiguous click stays claimed. */
 export function failBrowserInput(id: string, owner: string, error: string): Promise<boolean> {
@@ -1501,7 +1385,7 @@ export function failBrowserInput(id: string, owner: string, error: string): Prom
     await commit(current.map((row) => sameDelivery(entry, row) ? pickupCancelled
       ? withoutSilenceClaim(row, row === entry && preserveBoundary)
       : { ...row, state: entry.companionInputId ? 'cancelled' : 'failed', error: error.slice(0, 200) } : row));
-    decisionWaiters.get(id)?.reject(new Error('goal_browser_send_failed: ' + error.slice(0, 200)));
+    decisionWaiters.get(id)?.reject(new Error('decision_browser_send_failed: ' + error.slice(0, 200)));
     decisionWaiters.delete(id);
     return true;
   });
@@ -1520,12 +1404,11 @@ export async function publishBrowserDecision(id: string, owner: string, conversa
   waiter.publish?.(text); return true;
 }
 export async function requestBrowserDecision(text: string, signal: AbortSignal, options: {
-  lifetime?: 'temporary-planner';
-  sourceSessionId?: string; conversationId?: string | null; model?: string;
+  model?: string;
   reasoningEffort?: InputArgs['reasoningEffort'];
   publish?: (text: string) => void;
 } = {}): Promise<string> {
-  if (!text.trim() || text.length > MAX_CHATGPT_MESSAGE_CHARS) throw new Error('goal_context_too_large');
+  if (!text.trim() || text.length > MAX_CHATGPT_MESSAGE_CHARS) throw new Error('decision_context_too_large');
   signal.throwIfAborted();
   const id = randomUUID();
   let resolveAnswer!: (text: string) => void;
@@ -1535,22 +1418,18 @@ export async function requestBrowserDecision(text: string, signal: AbortSignal, 
   decisionWaiters.set(id, { resolve: resolveAnswer, reject: rejectAnswer, publish: options.publish });
   const cancel = () => {
     decisionWaiters.delete(id);
-    rejectAnswer(new Error('goal_browser_cancelled'));
+    rejectAnswer(new Error('decision_browser_cancelled'));
   };
   signal.addEventListener('abort', cancel, { once: true });
   try {
     const queued = await serial(async () => {
       signal.throwIfAborted();
       const current = await load();
-      if (current.filter((row) => row.purpose === 'decision' && ['queued', 'browser', 'decision'].includes(row.state)).length >= 4) throw new Error('goal_browser_busy');
-      if (options.sourceSessionId && current.some(row => row.decisionSourceSessionId === options.sourceSessionId && !terminal(row))) throw new Error('goal_browser_busy');
-      if (options.sourceSessionId && !options.conversationId && current.some(row => row.decisionSourceSessionId === options.sourceSessionId && row.state === 'cancelled' && !row.conversationId)) {
-        throw new Error('goal_browser_send_unconfirmed');
-      }
+      if (current.filter((row) => row.purpose === 'decision' && ['queued', 'browser', 'decision'].includes(row.state)).length >= 4) throw new Error('decision_browser_busy');
       const entry = entrySchema.parse({ id, sessionId: null, text, mode: 'after-turn', dueAt: Date.now(),
         model: options.model ?? 'gpt-5.6-sol', reasoningEffort: options.reasoningEffort ?? 'high',
-        decisionSourceSessionId: options.sourceSessionId, lifetime: options.lifetime, purpose: 'decision', state: 'queued', owner: null,
-        createdAt: Date.now(), conversationId: options.conversationId ?? null });
+        lifetime: 'temporary-planner', purpose: 'decision', state: 'queued', owner: null,
+        createdAt: Date.now(), conversationId: null });
       await commit(append(current, entry));
       return entry;
     });

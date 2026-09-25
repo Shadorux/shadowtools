@@ -4,7 +4,7 @@ export type RecoveryCountdown = {
   deadline: number;
   /** The existing UI clock reveals this row without needing a new backend event. */
   visibleAt?: number;
-  next?: 'queue' | 'goal' | 'loop' | 'continue';
+  next?: 'queue' | 'continue';
   /** The original attribution retry conditions are currently satisfied. */
   reload?: true;
   /** CoS still holds the source turn open during the existing post-reload wait. */

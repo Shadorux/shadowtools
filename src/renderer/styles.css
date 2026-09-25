@@ -1765,11 +1765,6 @@ textarea {
   line-height: 1.45;
 }
 
-.goal-prompt textarea {
-  font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
-  font-size: calc(12px * var(--text-scale, 1));
-}
-
 input[readonly] {
   background: var(--sunk);
   color: var(--soft);
@@ -2765,71 +2760,6 @@ nav button:hover, nav button.is-sel { background: var(--hover); color: var(--ink
   z-index: 10;
 }
 
-/* ------------------------------------------------------------- the goal loop */
-
-/* The missing-key notice is a whole sentence and the one thing on the row worth reading, so
-   it is allowed to wrap where every other setting hint is clipped to a line. */
-.setting-text em.is-warn {
-  color: var(--red);
-  font-weight: 600;
-  overflow: visible;
-  white-space: normal;
-}
-
-/* The model picker. Closed until somebody asks for it, twenty at a time, and scrolling
-   rather than growing — the pane below it is a settings sheet, not a catalogue. */
-.goal-models {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 260px;
-  overflow-y: auto;
-  margin-bottom: 8px;
-  padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-}
-
-.goal-model {
-  display: block;
-  width: 100%;
-  padding: 7px 9px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.goal-model:hover {
-  background: var(--hover);
-}
-
-.goal-model[data-chosen='1'] {
-  background: var(--hover);
-  box-shadow: inset 2px 0 0 var(--blue);
-}
-
-.goal-model-name {
-  display: block;
-  font-size: calc(12.5px * var(--text-scale, 1));
-  font-weight: 550;
-}
-
-/* The id and the release date, which is what the list is sorted by and therefore the thing
-   somebody is scanning for. */
-.goal-model-meta {
-  display: block;
-  font-style: normal;
-  font-size: calc(11px * var(--text-scale, 1));
-  color: var(--faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .composer-options { display: flex; flex-wrap: nowrap; align-items: center; gap: 2px; }
 .composer-options select { border: 0; background: transparent; color: var(--soft); font: inherit; font-size: calc(11px * var(--text-scale, 1)); max-width: 130px; padding: 5px; }
 .input-queue { display: flex; flex-direction: column; width: 100%; margin: 0 auto; }
@@ -3022,8 +2952,6 @@ select option::checkmark { order: 1; margin-inline-start: auto; color: var(--ink
 #composerSettings > summary { width: 36px; height: 36px; padding: 8px; justify-content: center; }
 #composerSettings > summary .ico { width: 20px; height: 20px; }
 #composerSettings .composer-popover { width: 280px; left: 50%; right: auto; translate: -50% 0; transform-origin: bottom center; max-height: min(520px, 70vh); overflow-y: auto; }
-#composerSettings #loopDeliveryRow { flex-direction: column; align-items: stretch; gap: 7px; padding: 12px 9px 6px; }
-#loopDeliveryRow select { width: 100%; max-width: 100%; padding: 9px 11px; border-radius: 9px; line-height: 1.4; }
 .automation-switch { display: flex; padding: 3px; gap: 3px; border-radius: 10px; background: var(--sunk); }
 .automation-switch button { justify-content: center; padding: 8px 12px; transition: background .15s ease; color: var(--soft); }
 .automation-switch button[aria-checked='true'] { background: color-mix(in srgb, var(--accent) 18%, var(--card)); color: var(--ink); box-shadow: 0 1px 3px #0002; }
@@ -3328,7 +3256,7 @@ select option::checkmark { order: 1; margin-inline-start: auto; color: var(--ink
 
 .composer-dock { --edge: var(--composer-edge); width: min(836px, calc(100% - 72px)); margin: 10px auto -15px; border: 1px solid var(--edge); border-bottom: 0; border-radius: 16px 16px 0 0; background: var(--card); overflow: hidden; }
 .composer-dock[hidden], .app[data-screen='settings'] .composer-dock, .composer-dock:not(:has(> :not([hidden]))) { display: none; }
-.composer-dock .queued-input, #activeGoalRow, .recovery-notice { display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 7px 12px; margin: 0; border: 0; border-bottom: 1px solid var(--edge); font-size: calc(13px * var(--text-scale, 1)); color: var(--soft); }
+.composer-dock .queued-input, .recovery-notice { display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 7px 12px; margin: 0; border: 0; border-bottom: 1px solid var(--edge); font-size: calc(13px * var(--text-scale, 1)); color: var(--soft); }
 .recovery-countdown { flex-shrink: 0; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
 .composer-dock > :nth-last-child(1 of :not([hidden])) { border-bottom: 0; }
 .composer-dock > :nth-last-child(1 of :not([hidden])) > .queued-input:last-child { border-bottom: 0; }
@@ -3359,9 +3287,6 @@ select option::checkmark { order: 1; margin-inline-start: auto; color: var(--ink
 
 #usageTooltip { width: max-content; max-width: min(340px, calc(100vw - 24px)); white-space: pre-line; overflow-wrap: normal; }
 @media (max-width: 700px) { .usage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 20px; } }
-
-#goalLifecycle .queue-label { white-space: normal; }
-.goal-live-preview { max-height: 120px; overflow: auto; white-space: pre-wrap; margin: 6px 0 0; font: inherit; color: var(--soft); }
 
 .context-meter { position: relative; flex: 0 0 28px; }
 #contextMeterButton { display: grid; place-items: center; width: 28px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--soft); cursor: pointer; }

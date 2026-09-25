@@ -128,7 +128,7 @@ describe('secret store', () => {
 
     const read = getSecret('bridgeToken');
     await decryptStarted;
-    const write = setSecret('openRouterApiKey', 'or-written-during-load');
+    const write = setSecret('setup:secondary', 'or-written-during-load');
     // Give the mutation a chance to reach readAll(). It must join the existing load instead of
     // starting a second decrypt of the same old ciphertext.
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -139,12 +139,12 @@ describe('secret store', () => {
     expect(safeStorage.decryptStringAsync).toHaveBeenCalledTimes(1);
 
     // A second mutation is the destructive edge of the old race: if the late read had replaced
-    // cache with its stale snapshot, this write would silently drop openRouterApiKey.
+    // cache with its stale snapshot, this write would silently drop setup:secondary.
     await setSecret('openaiApiKey', 'sk-after-load-race');
     resetSecretsCacheForTests();
     expect(await getSecret('bridgeToken')).toBe('bridge-before-load-race');
     expect(await getSecret('openaiApiKey')).toBe('sk-after-load-race');
-    expect(await getSecret('openRouterApiKey')).toBe('or-written-during-load');
+    expect(await getSecret('setup:secondary')).toBe('or-written-during-load');
   });
 
   it('does not turn a transient unavailable keyring into an empty authoritative secret store', async () => {
@@ -158,7 +158,7 @@ describe('secret store', () => {
     vi.mocked(safeStorage.decryptStringAsync).mockClear();
     expect(await getSecret('bridgeToken')).toBeNull();
     expect(safeStorage.decryptStringAsync).not.toHaveBeenCalled();
-    await expect(setSecret('openRouterApiKey', 'must-not-overwrite')).rejects.toThrow(/credential storage is unavailable/i);
+    await expect(setSecret('setup:secondary', 'must-not-overwrite')).rejects.toThrow(/credential storage is unavailable/i);
 
     // Unlocking the host store later in the same process must retry disk, not keep the
     // temporary empty view cached and risk overwriting the real encrypted blob on the next save.
@@ -198,11 +198,11 @@ describe('secret store', () => {
 
     // The destructive edge: a later save must compose from the deleted empty store, not from
     // plaintext the old decrypt held before deletion, otherwise it silently recreates old keys.
-    await setSecret('openRouterApiKey', 'or-after-delete-race');
+    await setSecret('setup:secondary', 'or-after-delete-race');
     resetSecretsCacheForTests();
     expect(await getSecret('bridgeToken')).toBeNull();
     expect(await getSecret('openaiApiKey')).toBeNull();
-    expect(await getSecret('openRouterApiKey')).toBe('or-after-delete-race');
+    expect(await getSecret('setup:secondary')).toBe('or-after-delete-race');
   });
 
   it('does not overwrite secrets when storage disappears between availability check and decrypt', async () => {
@@ -218,14 +218,14 @@ describe('secret store', () => {
       vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockResolvedValue(false);
       throw new Error('credential backend became unavailable');
     });
-    await expect(setSecret('openRouterApiKey', 'must-not-replace-existing-blob')).rejects.toThrow(
+    await expect(setSecret('setup:secondary', 'must-not-replace-existing-blob')).rejects.toThrow(
       /credential storage is unavailable/i
     );
 
     vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockResolvedValue(true);
     expect(await getSecret('bridgeToken')).toBe('bridge-token-survives-decrypt-race');
     expect(await getSecret('openaiApiKey')).toBe('sk-survives-decrypt-race');
-    expect(await getSecret('openRouterApiKey')).toBeNull();
+    expect(await getSecret('setup:secondary')).toBeNull();
   });
 
   it('treats any async decrypt rejection as non-authoritative even if availability still reports true', async () => {
@@ -242,7 +242,7 @@ describe('secret store', () => {
     // rejected decrypt must never be converted into an empty authoritative store solely because
     // isAsyncEncryptionAvailable() still says that the provider exists.
     expect(await getSecret('bridgeToken')).toBeNull();
-    await expect(setSecret('openRouterApiKey', 'must-not-replace-ambiguous-blob')).rejects.toThrow(
+    await expect(setSecret('setup:secondary', 'must-not-replace-ambiguous-blob')).rejects.toThrow(
       /credential storage is unavailable/i
     );
     expect(await fs.readFile(file)).toEqual(before);
@@ -268,7 +268,7 @@ describe('secret store', () => {
     const before = await fs.readFile(file);
 
     expect(await getSecret('bridgeToken')).toBeNull();
-    await expect(setSecret('openRouterApiKey', 'must-not-replace-malformed-blob')).rejects.toThrow(
+    await expect(setSecret('setup:secondary', 'must-not-replace-malformed-blob')).rejects.toThrow(
       /credential storage is unavailable/i
     );
     expect(await fs.readFile(file)).toEqual(before);

@@ -64,7 +64,6 @@ import {
   thawPrimeTransfer
 } from '../agents.js';
 import { clearChatWorkspace, moveChatWorkspace, workspaceForChat } from '../workspace.js';
-import { clearGoalObjective, clearGoalSwitch, goalObjectiveFor, goalSwitchFor, moveGoalObjective, moveGoalSwitch, retireGoalDraftsFor } from '../goal.js';
 import { writeDurableNow, writeDurableSoon } from '../durable.js';
 import { prepareHandoff, resumeBootstrapMatches } from './handoff.js';
 import { ensureHandoffRecorded, recordHandoff, recordNote, rebindConversation } from './recorder.js';
@@ -605,7 +604,7 @@ export function pendingContinuations(): ContinuationView[] {
 export async function repairPrimeFromResumeShadow(conversationId: string): Promise<boolean> {
   if (!conversationId) return false;
   // A resume shadow is prime/solo history. Even otherwise convincing old provenance must never
-  // move Goal/workspace into a conversation the broker knows belongs to a worker.
+  // move workspace state into a conversation the broker knows belongs to a worker.
   const targetOwner = agentForOwnedConversation(conversationId);
   if (targetOwner && targetOwner !== PRIME_ID) return false;
   let target;
@@ -631,12 +630,12 @@ export async function repairPrimeFromResumeShadow(conversationId: string): Promi
   // recovery already moved the *same* run A→C, only C remains owned and this idempotent
   // projection repair is still allowed — that is the live 2.0.1 damage pattern this exists for.
   if (targetOwner === PRIME_ID && sourceOwner === PRIME_ID) return false;
-  // Once the same run's prime ownership has already reached B and A has no remaining Goal or
-  // workspace projection, there is nothing left for this browser poll to repair. The broker
+  // Once the same run's prime ownership has already reached B and A has no remaining workspace
+  // projection, there is nothing left for this browser poll to repair. The broker
   // recovery hook deliberately reports an already-satisfied A→B as success, so calling it again
   // would otherwise turn every /activity poll into another "moved missing projections" warning
-  // (and another exact-handoff event scan) forever on resumed chats that have no Goal.
-  if (targetOwner === PRIME_ID && !workspaceForChat(fromConversationId) && !goalObjectiveFor(fromConversationId)) {
+  // (and another exact-handoff event scan) forever on resumed chats with no remaining projection.
+  if (targetOwner === PRIME_ID && !workspaceForChat(fromConversationId)) {
     return false;
   }
   const failed = [...byToken.values()].find(
@@ -654,8 +653,8 @@ export async function repairPrimeFromResumeShadow(conversationId: string): Promi
     // proof for those already-stranded chats: the target must durably say this app opened it as a
     // resume from S, S must still own A, S's newest handoff must *not* be marked committed, and B
     // must have durably recorded the exact bootstrap text generated from that handoff. This is the
-    // same authored-text equality used by Goal's legacy provenance migration, but stricter here
-    // because the target session origin also names the exact source session.
+    // same authored-text equality used by the continuation provenance migration, but stricter
+    // here because the target session origin also names the exact source session.
     if (handoffId === source.lastCommittedResumeHandoffId) return false;
   }
   const handoff = await readHandoff(source.id, handoffId).catch(() => null);
@@ -678,8 +677,7 @@ export async function repairPrimeFromResumeShadow(conversationId: string): Promi
   if (currentTargetOwner === PRIME_ID && currentSourceOwner === PRIME_ID) return false;
   if (
     currentTargetOwner === PRIME_ID &&
-    !workspaceForChat(fromConversationId) &&
-    !goalObjectiveFor(fromConversationId)
+    !workspaceForChat(fromConversationId)
   ) {
     return false;
   }
@@ -687,8 +685,8 @@ export async function repairPrimeFromResumeShadow(conversationId: string): Promi
   // The durable session rebind never landed in this legacy race, so normal
   // publishCommittedProjection() never ran either. Once the exact app-created resume shadow +
   // positive proof above identifies which A→B attempt this is, repair only projections that are
-  // still missing on the descendant. A descendant can have accumulated newer Goal/workspace
-  // state before an upgraded build gets its first chance to heal the old collision; that newer
+  // still missing on the descendant. A descendant can have accumulated newer workspace state
+  // before an upgraded build gets its first chance to heal the old collision; that newer
   // target state wins. The stale A projection is still removed so opening A later cannot keep
   // using authority that belongs to the continued chat.
   let workspaceChanged = false;
@@ -697,34 +695,20 @@ export async function repairPrimeFromResumeShadow(conversationId: string): Promi
   } else {
     workspaceChanged = moveChatWorkspace(fromConversationId, conversationId);
   }
-  let goalChanged = false;
-  if (goalObjectiveFor(conversationId)) {
-    if (goalObjectiveFor(fromConversationId)) {
-      clearGoalObjective(fromConversationId);
-      goalChanged = true;
-    }
-  } else {
-    goalChanged = moveGoalObjective(fromConversationId, conversationId);
-  }
-  // The chat's own Goal/Loop switch travels with its objective. A loop that was running in A
-  // is still running in B — the whole point of Compact & Resume is that the work continues —
-  // and leaving the override behind would silently hand B back to the app-wide setting.
-  if (goalSwitchFor(conversationId).own) clearGoalSwitch(fromConversationId);
-  else if (moveGoalSwitch(fromConversationId, conversationId)) goalChanged = true;
   // The recovery hook uses success semantics: replaying an already-repaired target returns true
   // by design. Here this boolean means "changed on this call" and drives a user-visible warning,
-  // so an already-owned target must not be counted as a fresh broker mutation. Missing Goal or
-  // workspace projections above are still repaired normally.
+  // so an already-owned target must not be counted as a fresh broker mutation. Missing workspace
+  // projections above are still repaired normally.
   const repaired =
     currentTargetOwner === PRIME_ID
       ? false
       : (recoveryHooks.repairPrimeTransfer?.(fromConversationId, conversationId) ?? false);
-  if (repaired || workspaceChanged || goalChanged) {
+  if (repaired || workspaceChanged) {
     logWarn(
       `resume-shadow repair (${proof}) moved missing projections into chat ${conversationId}`
     );
   }
-  return repaired || workspaceChanged || goalChanged;
+  return repaired || workspaceChanged;
 }
 
 /**
@@ -1191,10 +1175,6 @@ function publishCommittedProjection(
 ): void {
   rebindConversation(entry.sessionId, entry.from, toConversationId);
   moveChatWorkspace(entry.from, toConversationId);
-  moveGoalObjective(entry.from, toConversationId);
-  moveGoalSwitch(entry.from, toConversationId);
-  // A's final is superseded, never a completed turn in B. B earns its own debt.
-  retireGoalDraftsFor(entry.from);
   if (swarm === 'frozen' || swarm === 'absent') {
     if (!commitPrimeTransfer(entry.from, toConversationId)) {
       // The frozen handover cannot expire. A miss here means the run ended outright while

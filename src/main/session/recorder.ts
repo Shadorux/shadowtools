@@ -107,7 +107,7 @@ interface LiveConversation {
    * A request id is minted per server turn and outlives anything the page does: a reload,
    * a lost stream, a Stop click. So a call under one of these ids that *starts* after the
    * reported end is proof the end was the page's mistake — ChatGPT is still working that
-   * turn — and the recorder reopens it rather than let Goal answer a turn that has not
+   * turn — and the recorder reopens it rather than let recovery treat a turn as finished when it has not
    * finished. See reopenFalselyEndedTurn. In-memory only: an app restart inside such a turn
    * loses the proof, and the turn stays closed as the page reported it.
    */
@@ -1421,7 +1421,7 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
         void work.then(() => pendingRecordings.delete(work));
       });
     }
-    const reopenedTurnId = await serializeObservations(target.conversationId ?? sessionId, () => reopenFalselyEndedTurn(
+    await serializeObservations(target.conversationId ?? sessionId, () => reopenFalselyEndedTurn(
       sessionId,
       target.conversationId,
       input.requestId ?? null,
@@ -1446,7 +1446,6 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
         completed?.completedAt ?? null,
         // The one thing an unattributed call still carries: the server turn it belongs to.
         input.requestId ?? null,
-        reopenedTurnId,
         filed
       );
     } catch (err) {
@@ -1486,10 +1485,10 @@ async function reopenThinkingFailure(sessionId: string, live: LiveConversation |
  * mint a new request id for a turn it is still working, so the turn never ended, and only the
  * page's view of it did. Live 2026-09-02: a reload mid-turn adopted the open turn and closed it
  * "completed" four seconds later from interim prose; the same request id then called tools for
- * twenty-four more minutes, and Goal typed the next message against an answer that had never
+ * twenty-four more minutes, and recovery could otherwise act against an answer that had never
  * been given. The reopening is app-authored and durable — a second `turn_start` for the same
  * id, named as such — so the page's real end is accepted afterwards, the projection hands the
- * open id back to the next document, and Goal is told (through the attribution listener) that
+ * open id back to the next document, and the attribution listener is told that
  * the decision it was drafting was owed to nothing.
  *
  * Deliberately narrow: a call that *started* before the reported end is the ordinary in-flight
@@ -1581,7 +1580,6 @@ let attributionListener:
       endsActivity: boolean,
       completedFinalAt: number | null,
       requestId: string | null,
-      reopenedTurnId: string | null,
       filedSession: SessionSummary | null
     ) => void)
   | null = null;
@@ -1596,8 +1594,6 @@ export function setCallAttributionListener(
         endsActivity: boolean,
         completedFinalAt: number | null,
         requestId: string | null,
-        /** The turn this call reopened, when it proved the page's completed end false. */
-        reopenedTurnId: string | null,
         filedSession: SessionSummary | null
       ) => void)
     | null
@@ -1723,8 +1719,6 @@ export interface ChatObservation {
   /** Exact native failure; closes input immediately, recovery separately owns listening. */
   reason?: 'thinking_failed';
   detail?: string;
-  /** Browser terminal proof; app-owned Goal policy is applied only after this is durable. */
-  goalEligible?: boolean;
   /** chat_error only: explicit recovery authority from a transport failure or app watchdog. */
   recoverable?: boolean;
   /** chat_error only: the DOM classifier identified a provider access limit, in any language. */
@@ -1924,7 +1918,6 @@ export function recordChatObservations(
   sessionId: string | null;
   stored: number;
   activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedAt?: number; endedTurnId?: string };
-  goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
 }> {
   const hasEvidence = observations.some((item) => item.kind === 'tool_evidence');
   const ownership = hasEvidence ? recordRequestEvidence(conversationId, observations) : null;
@@ -1970,7 +1963,7 @@ async function supersededLineage(conversationId: string): Promise<string | null>
 /**
  * What a replaced chat may still add to its session: its messages, and nothing else.
  *
- * The session's live turn, activity clock, Goal obligations and title belong to the chat
+ * The session's live turn, activity clock and title belong to the chat
  * that replaced it, so a lingering page on the old chat records prose only — the brief's
  * final rendering arriving after the commit, or the user carrying on in the old tab — and
  * moves none of the projections the replacement now owns.
@@ -2038,15 +2031,14 @@ async function recordChatObservationsNow(
   sessionId: string | null;
   stored: number;
   activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedAt?: number; endedTurnId?: string };
-  goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
 }> {
   const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedAt?: number; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
-  if (!recordingEnabled()) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  if (!recordingEnabled()) return { sessionId: null, stored: 0, activity };
   if (!conversations.has(conversationId)) {
     const lineage = await supersededLineage(conversationId);
     if (lineage) {
       const stored = await recordSupersededMessages(lineage, observations);
-      return { sessionId: lineage, stored, activity, goalCandidates: [] };
+      return { sessionId: lineage, stored, activity };
     }
   }
   let firstUser: ChatObservation | undefined;
@@ -2070,11 +2062,10 @@ async function recordChatObservationsNow(
     conversationId,
     pageTitle?.text?.trim() || observedUserTitle(firstUser?.text)
   );
-  if (!sessionId) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  if (!sessionId) return { sessionId: null, stored: 0, activity };
   const live = conversations.get(conversationId);
   let stored = 0;
-  let recoveredGoalSeen = false;
-  const goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }> = [];
+  let recoveredTerminalSeen = false;
   // Reload can lose or replace the page's turn id. The canonical message store keeps
   // the first exact owner of that stable assistant message through every revision.
   // Decide recovery from its committed result, never the replacement page's hint.
@@ -2123,7 +2114,7 @@ async function recordChatObservationsNow(
         const state = item.state ?? (item.final === true ? 'final' : 'streaming');
         // A reload can destroy the document-local generation id after this recorder already
         // made the only honest lifecycle verdict it could: unknown/failed/interrupted/stalled.
-        // A new stable final reply is stronger evidence about Goal than that lost id, but an
+        // A new stable final reply is stronger terminal evidence than that lost id, but an
         // old final seen merely by opening an idle chat is not. The prior uncertain boundary is
         // therefore the exact fence; the stable reply id is the durable exactly-once identity.
         const batchUncertainStartedAt = batchUncertainEndId
@@ -2142,13 +2133,12 @@ async function recordChatObservationsNow(
           state === 'final' &&
           (item.activeNow === true ||
             (uncertainTurnStartedAt !== null && item.time >= uncertainTurnStartedAt));
-        const recoveredGoalEligible =
+        const recoveredTerminalEvidence =
           state === 'final' &&
           !item.turnId &&
           live !== undefined &&
           uncertainTurnStartedAt !== null &&
           item.time >= uncertainTurnStartedAt;
-        const goalEligible = item.goalEligible === true || recoveredGoalEligible;
         const written = await upsertMessageEvent(sessionId, {
           ...base,
           kind: 'assistant_message',
@@ -2161,8 +2151,7 @@ async function recordChatObservationsNow(
           messageId: item.messageId,
           state,
           final: state === 'final',
-          ...(item.providerMessageId ? { providerMessageId: item.providerMessageId } : {}),
-          ...(goalEligible && state === 'final' ? { goalEligible: true } : {})
+          ...(item.providerMessageId ? { providerMessageId: item.providerMessageId } : {})
         }, { preferTime: item.authoredTime === true, work: item.activeNow === true });
         const canonicalTurn = written.event.turnId;
         // A stopped partial answer stays streaming in history. Re-observing its
@@ -2190,23 +2179,10 @@ async function recordChatObservationsNow(
             seq: written.event.finalContentSeq ?? written.event.origin ?? written.event.seq,
             origin: written.event.origin ?? written.event.seq, native: Boolean(written.event.providerMessageId) };
         }
-        if (
-          written.event.kind === 'assistant_message' &&
-          written.event.goalEligible === true &&
-          state === 'final' &&
-          written.event.messageId
-        ) {
-          goalCandidates.push({
-            replyId: written.event.messageId,
-            turnId: written.event.turnId ?? `reply:${written.event.messageId}`.slice(0, 200),
-            eventSeq: written.event.origin ?? written.event.seq
-          });
-        }
-        if (recoveredGoalEligible && live) {
+        if (recoveredTerminalEvidence && live) {
           // This is an in-memory verdict for later call/reload decisions, not a fabricated
-          // turn_end. The canonical message keeps goalEligible monotonically, so an HTTP 503
-          // can still replay the same obligation even after this stronger final evidence wins.
-          recoveredGoalSeen = true;
+          // turn_end. The stable final is enough to settle the previously uncertain view.
+          recoveredTerminalSeen = true;
         }
         if (!written.changed) continue;
         if (state === 'final' && written.event.kind === 'assistant_message' && written.event.providerMessageId &&
@@ -2231,7 +2207,7 @@ async function recordChatObservationsNow(
       }
       case 'native_image': {
         // Native media is transcript content only. It does not renew activity, close a turn,
-        // create a Goal candidate, or masquerade as a locally executed tool call.
+        // create a terminal-response signal, or masquerade as a locally executed tool call.
         stored += await recordNativeImage(sessionId, item, base);
         continue;
       }
@@ -2349,7 +2325,7 @@ async function recordChatObservationsNow(
           live.lastTurnOutcome = item.outcome ?? 'unknown';
           live.lastTurnStartedAt = endedStartedAt;
           // Only a completed end can be proven false by a later call: it is the one verdict
-          // Goal acts on, and the one a reloaded page fabricates. A stop is the user's own
+          // recovery acts on, and the one a reloaded page fabricates. A stop is the user's own
           // decision and the failure outcomes already belong to recovery.
           live.endedTurn =
             live.turnId === item.turnId && item.outcome === 'completed'
@@ -2407,9 +2383,9 @@ async function recordChatObservationsNow(
     activity.endedTurnId = turnId;
     stored++;
   }
-  if (recoveredGoalSeen && live) live.lastTurnOutcome = 'completed';
+  if (recoveredTerminalSeen && live) live.lastTurnOutcome = 'completed';
   notifyChanged();
-  return { sessionId, stored, activity, goalCandidates };
+  return { sessionId, stored, activity };
 }
 
 /** Records something the app itself decided, e.g. a saved handoff. */
@@ -2438,7 +2414,7 @@ export async function recordProgress(
   text: string,
   anchor?: { seq: number; time: number },
   turnId?: string | null,
-  finishControl?: { state: 'released' | 'notified' | 'decision'; conversationId: string; revision?: string; inputRevision?: string; workSeq?: number }
+  finishControl?: { state: 'released' | 'notified'; conversationId: string }
 ): Promise<{ seq: number; time: number } | null> {
   if (!recordingEnabled() || !progressId) return null;
   const time = anchor?.time ?? Date.now();

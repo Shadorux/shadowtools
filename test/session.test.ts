@@ -730,7 +730,7 @@ describe('session store', () => {
   it('selects terminal alias content independently of cursor and repairs an otherwise current legacy summary once', async () => {
     const summary = await createSession({ title: 'legacy alias checkpoint' });
     const first = await upsertMessageEvent(summary.id, { kind: 'assistant_message', source: 'extension', time: 100,
-      messageId: 'first', providerMessageId: 'same-provider', turnId: 'original-turn', goalEligible: true,
+      messageId: 'first', providerMessageId: 'same-provider', turnId: 'original-turn',
       message: { text: 'Old final', chars: 9, truncated: false }, final: true, state: 'final' });
     await flushSessions();
     const metaFile = path.join(sessionsRoot(), summary.id, 'meta.json');
@@ -738,7 +738,7 @@ describe('session store', () => {
     const streaming = { ...first.event, messageId: 'streaming-alias', origin: 3, seq: 30, time: 300,
       message: { text: 'Partial', chars: 7, truncated: false }, final: false, state: 'streaming' as const };
     const terminal = { ...first.event, messageId: 'final-alias', origin: 4, seq: 20, time: 400,
-      turnId: undefined, goalEligible: undefined,
+      turnId: undefined,
       message: { text: 'Latest complete final answer', chars: 28, truncated: false } };
     const files: string[] = [];
     for (const event of [streaming, terminal]) {
@@ -1196,101 +1196,6 @@ describe('session store', () => {
     expect(liveConversations().find(entry => entry.conversationId === conversationId)).toMatchObject({
       generating: true, activeTurnId: 'g-current'
     });
-  });
-
-  it('offers a stable final reply to Goal after reload lost an uncertain turn identity', async () => {
-    const conversationId = 'c-goal-final-after-reload';
-    await recordChatObservations(conversationId, [
-      { kind: 'turn_start', time: 10, turnId: 'g-before-reload' },
-      { kind: 'turn_end', time: 20, turnId: 'g-before-reload', outcome: 'unknown' }
-    ]);
-
-    const recovered = await recordChatObservations(conversationId, [{
-      kind: 'assistant_message',
-      // ChatGPT may stamp the assistant object when generation starts, before a later detach.
-      time: 15,
-      messageId: 'assistant-stable-after-reload',
-      text: 'The complete final answer that appeared after reload.',
-      state: 'final',
-      final: true
-    }]);
-
-    expect(recovered.goalCandidates).toEqual([{
-      replyId: 'assistant-stable-after-reload',
-      turnId: 'reply:assistant-stable-after-reload',
-      eventSeq: expect.any(Number)
-    }]);
-
-    const replayed = await recordChatObservations(conversationId, [{
-      kind: 'assistant_message',
-      time: 15,
-      messageId: 'assistant-stable-after-reload',
-      text: 'The complete final answer that appeared after reload.',
-      state: 'final',
-      final: true
-    }]);
-    expect(replayed.goalCandidates).toEqual(recovered.goalCandidates);
-    const [storedFinal] = await readEvents(recovered.sessionId!, { kinds: ['assistant_message'] });
-    expect(storedFinal?.kind === 'assistant_message' && storedFinal.goalEligible).toBe(true);
-  });
-
-  it('does not turn a historical final answer into Goal work merely because a chat was opened', async () => {
-    const conversationId = 'c-goal-historical-final';
-    await recordChatObservations(conversationId, [
-      { kind: 'turn_start', time: 100, turnId: 'g-newer-uncertain' },
-      { kind: 'turn_end', time: 200, turnId: 'g-newer-uncertain', outcome: 'unknown' }
-    ]);
-    const recovered = await recordChatObservations(conversationId, [{
-      kind: 'assistant_message',
-      time: 30,
-      messageId: 'assistant-historical-final',
-      text: 'An answer from an already idle chat.',
-      state: 'final',
-      final: true
-    }]);
-
-    expect(recovered.goalCandidates).toEqual([]);
-  });
-
-  it('uses the stable final when it and the uncertain end arrive in the same browser batch', async () => {
-    const recovered = await recordChatObservations('c-goal-final-same-batch', [
-      { kind: 'turn_start', time: 10, turnId: 'g-same-batch' },
-      {
-        kind: 'assistant_message',
-        time: 15,
-        messageId: 'assistant-final-same-batch',
-        text: 'Complete despite the page losing its finish edge.',
-        state: 'final',
-        final: true
-      },
-      { kind: 'turn_end', time: 20, turnId: 'g-same-batch', outcome: 'unknown' }
-    ]);
-
-    expect(recovered.goalCandidates).toEqual([expect.objectContaining({
-      replyId: 'assistant-final-same-batch',
-      turnId: 'reply:assistant-final-same-batch'
-    })]);
-  });
-
-  it('does not spend an earlier uncertain boundary while a newer turn is still open', async () => {
-    const conversationId = 'c-goal-newer-turn-open';
-    await recordChatObservations(conversationId, [
-      { kind: 'turn_start', time: 10, turnId: 'g-old-uncertain' },
-      { kind: 'turn_end', time: 20, turnId: 'g-old-uncertain', outcome: 'unknown' }
-    ]);
-    const current = await recordChatObservations(conversationId, [
-      { kind: 'turn_start', time: 30, turnId: 'g-new-open' },
-      {
-        kind: 'assistant_message',
-        time: 35,
-        messageId: 'assistant-while-new-open',
-        text: 'Do not decide this turn before its own terminal boundary.',
-        state: 'final',
-        final: true
-      }
-    ]);
-
-    expect(current.goalCandidates).toEqual([]);
   });
 
   it('does not advance seq or summary state when the durable append fails', async () => {

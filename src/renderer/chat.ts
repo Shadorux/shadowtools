@@ -10,9 +10,6 @@ import { createFilePanel } from './file-panel.js';
 import { renderAgentPlan } from './agent-plan.js';
 import { userPromptText } from '../shared/user-prompt.js';
 import { messageReaction, withoutMessageReaction } from '../shared/message-reaction.js';
-import { goalErrorMessage } from '../shared/goal-errors.js';
-import type { GoalModel } from '../shared/goal-reasoning.js';
-import { renderGoalReasoning } from './goal-reasoning.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
 import { createSidebarOrder } from './sidebar-order.js';
 import { toolResultText } from './tool-result.js';
@@ -22,16 +19,14 @@ import type { RecoveryCountdown } from '../shared/recovery.js';
 import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
 import { initContextMeter, paintContextMeter } from './context-meter.js';
 import { isAstraModel } from '../shared/chat-models.js';
-import { supportsFinishAutomation } from '../shared/finish.js';
-import type { InputImage, InputAttachment, InputAutomation } from '../shared/input.js';
+import type { InputImage, InputAttachment } from '../shared/input.js';
 import { injectableAttachments, queuedFollowup, MAX_INPUT_IMAGES } from '../shared/input.js';
 import type { InputArgs, InputEntry } from '../main/session/input.js';
 import type { LocalProject } from '../shared/projects.js';
 import type { TaskProgress } from '../shared/task-progress.js';
 /**
  * Desktop chat workspace: recorded prose/tool truth, exact-session controls and a composer.
- * The extension remains the ChatGPT transport; main owns permissions, delivery, Goal and
- * compaction. The renderer crosses only the fixed preload API and scopes async views to
+ * The extension remains the ChatGPT transport; main owns permissions, delivery and compaction. The renderer crosses only the fixed preload API and scopes async views to
  * the selected session generation. Token and cost values remain explicitly estimates.
  */
 
@@ -55,13 +50,6 @@ import {
 } from '../shared/session.js';
 import { chronological, positionOf } from '../shared/chronology.js';
 import { recentChatActivity, sessionWorkingAt, workerReportedFinish } from '../shared/session-activity.js';
-import {
-  DEFAULT_GOAL_MODEL,
-  DEFAULT_GOAL_LOOP_SYSTEM_PROMPT,
-  DEFAULT_GOAL_OBJECTIVE_SYSTEM_PROMPT,
-  DEFAULT_GOAL_SYSTEM_PROMPT,
-  MAX_GOAL_SYSTEM_PROMPT_CHARS
-} from '../shared/goal.js';
 import { browserExtensionRequired, type AppState, type Config } from '../shared/types.js';
 import { $, ago, clockTime, compactNumber, el, filterSettingsSections, icon, run, toast } from './dom.js';
 
@@ -90,7 +78,7 @@ const KIND_ICON: Record<ActivitySummary['kind'], string> = {
  * How close to the end of the model list counts as asking for the next page, in pixels.
  * A little over one row, so the fetch starts while there is still something to read.
  */
-const GOAL_SCROLL_MARGIN = 72;
+
 /** Page size and bounded staging capacity. A page is not a viewport: hundreds of
  * collapsed tool records can occupy less space than one authored message. */
 const MAX_TIMELINE_ROWS = 160;
@@ -172,7 +160,7 @@ let agentPanel: ReturnType<typeof createAgentPanel> | null = null;
 let filePanel: ReturnType<typeof createFilePanel> | null = null;
 const expandedWorkers = new Set<string>();
 const inputDrafts = new Map<string, string>();
-const newChatTasks = new Map<string, { objective: string; automation: string; loopDelivery: string }>();
+
 const imageDrafts = new Map<string, Array<InputImage | InputAttachment>>();
 const startingInputs = new Map<string, InputEntry>();
 const visibleInputIds = new Set<string>();
@@ -195,24 +183,13 @@ function dismissInputNotice(id: string): void {
 function authoredComposerText(): string { return skillPicker?.authoredText() ?? $<HTMLTextAreaElement>('chatInput').value; }
 function rememberDraft(): void {
   inputDrafts.set(draftKey(), authoredComposerText());
-  if (selectedId === null) newChatTasks.set(draftKey(), {
-    objective: $<HTMLTextAreaElement>('sessionObjective').value,
-    automation: $<HTMLSelectElement>('chatAutomation').value,
-    loopDelivery: $<HTMLSelectElement>('loopDelivery').value
-  });
 }
 let skillPicker: ReturnType<typeof initSkills> | undefined;
 function restoreDraft(): void {
   skillPicker?.close();
-  cancelGoalRequest();
-  $('activeGoalRow').hidden = true; $('recoveryStatus').hidden = true;
+  $('recoveryStatus').hidden = true;
   $<HTMLTextAreaElement>('chatInput').value = inputDrafts.get(draftKey()) ?? '';
   skillPicker?.restore();
-  const task = selectedId === null ? newChatTasks.get(draftKey()) : undefined;
-  const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = task?.automation ?? 'off'; delete automation.dataset.edited;
-  $<HTMLSelectElement>('loopDelivery').value = task?.loopDelivery ?? 'finish';
-  $<HTMLTextAreaElement>('sessionObjective').value = task?.objective ?? '';
-  delete $('sessionObjective').dataset.edited; delete $('sessionObjective').dataset.sessionId; delete $('sessionObjective').dataset.saved;
   paintTaskPlan(); paintComposerImages();
 }
 function paintComposerImages(): void {
@@ -714,7 +691,7 @@ function paintSessions(): void {
               const authoredDraft = authoredComposerText();
               selectedProjectId = null; selectionGeneration++; replaceComposerDraft();
               // Keep the visible draft and its attachments while moving to unfiled.
-              inputDrafts.set(draftKey(), authoredDraft); inputDrafts.delete(oldKey); newChatTasks.delete(oldKey);
+              inputDrafts.set(draftKey(), authoredDraft); inputDrafts.delete(oldKey);
               skillPicker?.restore();
               const images = imageDrafts.get(oldKey);
               if (images) imageDrafts.set(draftKey(), images);
@@ -823,70 +800,20 @@ let controlledSessionId: string | null = null;
 let controlledTurnId: string | null = null;
 let controlledSelection = -1;
 let controlledStopPending = false;
-let controlledFinishWaiting = false;
 let controlledQueueAtFinish = false;
 let controlledCanInject = false;
 let controlledCanSendDirectly = false;
 let controlledRecovery: RecoveryCountdown[] = [];
 let pendingComposerInputs: InputEntry[] = [];
 let inputQueueGeneration = 0;
-let goalIntentGeneration = 0;
-let goalProgress: (Omit<TaskProgress, 'phase'> & { phase: string; selection: number; inputId?: string }) | null = null;
-function cancelGoalRequest(): void {
-  const requestId = goalProgress?.requestId;
-  goalProgress = null;
-  if (requestId) void api.cancelTaskRequest?.(requestId);
-  paintGoalProgress();
-}
-type GoalDraftPresentation = { stage: string; model: string; text: string; error: string | null };
-let goalDraftView: GoalDraftPresentation | null = null;
-let goalWaitView: import('../shared/goal.js').GoalWait | null = null;
-let finishGoalDraftView: GoalDraftPresentation | null = null;
-function paintGoalProgress(): void {
-  let row = document.getElementById('goalLifecycle');
-  if (!row) { row = el('div', 'queued-input'); row.id = 'goalLifecycle'; row.setAttribute('role', 'status'); $('activeGoalRow').before(row); }
-  const progress = goalProgress?.selection === selectionGeneration ? goalProgress : null;
-  const entry = progress?.inputId ? pendingComposerInputs.find(item => item.id === progress.inputId) : undefined;
-  const finishDraft = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? finishGoalDraftView : null;
-  const draft = finishDraft ?? (controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalDraftView : null);
-  const wait = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalWaitView : null;
-  const off = $<HTMLSelectElement>('chatAutomation').value === 'off';
-  if (off && !finishDraft) { row.hidden = true; row.replaceChildren(); row.setAttribute('aria-busy', 'false'); return; }
-  let phase = progress?.phase ?? '';
-  let text = progress?.text ?? '', error = progress?.error;
-  if (entry) { phase = entry.state; error = entry.error ?? undefined; }
-  if (draft && (!off || finishDraft) && (finishDraft || !['saving', 'failed'].includes(phase))) { phase = draft.stage; text = draft.text; error = draft.error ?? undefined; }
-  else if (wait && !['saving', 'failed'].includes(phase)) { phase = 'settling'; text = ''; error = undefined; }
-  const labels: Record<string, string> = { saving: t("Saving task…"), saved: t("Task saved · waiting for the next completed answer"),
-    preparing: t("Preparing the opening message…"), generating: t("Generating the opening message…"), ready: t("Message ready · awaiting ChatGPT delivery"),
-    sending: t("Preparing a continuation…"), answering: t("Generating a continuation…"), queued: t("Opening message queued"),
-    browser: t("Sending opening message to ChatGPT…"), sent: t("Opening message sent"), tool: 'Opening message delivered to the active turn',
-    failed: t("Task could not continue"), cancelled: t("Opening message cancelled"), paused: t("Automation paused · task text preserved"), 'no-reply': t("Goal reached") };
-  if (phase === 'retrying') { text = ''; error = undefined; }
-  labels.retrying = t("Provider busy · retry {0}{1}", [progress?.attempt ?? '', progress?.retryAt ? ' at ' + new Date(progress.retryAt).toLocaleTimeString() : '']);
-  const mode = $<HTMLSelectElement>('chatAutomation').value === 'loop' ? t('Loop') : t('Goal');
-  labels.settling = `${mode} · ${wait?.reason === 'native-busy' ? t('ChatGPT resumed work · waiting before retry') : wait?.reason === 'silence' ? t('Waiting before recovery reload') : wait?.reason === 'quiet' ? t('Waiting for tool inactivity') :
-    wait?.reason === 'tools' ? t('Waiting for running tools') : wait?.reason === 'listening' ? t('Waiting for activity after recovery') : t('Answer settling')}`;
-  // The dock already describes this same silence/listening deadline. Keep the
-  // Loop/Goal task controls, but do not present its shared wait as another action.
-  const sharedRecoveryWait = phase === 'settling' && wait?.until !== undefined &&
-    ['silence', 'listening', 'native-busy', 'quiet'].includes(wait.reason) && controlledRecovery.some(countdown =>
-      ['silence', 'post-reload', 'native-busy', 'thinking-failed'].includes(countdown.kind) &&
-      countdown.deadline === wait.until && (countdown.visibleAt ?? 0) <= Date.now());
-  row.hidden = !phase || sharedRecoveryWait;
-  if (row.hidden) { row.replaceChildren(); row.setAttribute('aria-busy', 'false'); return; }
-  const busy = ['settling', 'saving', 'preparing', 'generating', 'retrying', 'sending', 'answering', 'browser', 'queued', 'ready'].includes(phase) && !error;
-  row.setAttribute('aria-busy', String(busy));
-  const marker = el('span', busy ? 'session-status is-working' : 'session-status');
-  const body = el('div', 'queue-label'); body.append(el('span', '', error ? `${labels.failed}: ${goalErrorMessage(error)}` : labels[phase] ?? phase));
-  if (text && ['generating', 'answering', 'preparing'].includes(phase)) { const preview = el('pre', 'goal-live-preview', text.slice(-8000)); body.append(preview); }
-  row.replaceChildren(marker, body);
-  if (phase === 'settling' && wait?.until) {
-    const seconds = Math.max(0, Math.ceil((wait.until - Date.now()) / 1000));
-    const timer = el('span', 'recovery-countdown', seconds ? t('Check in {0}', [`${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`]) : t('Checking for activity…'));
-    timer.setAttribute('role', 'timer'); timer.setAttribute('aria-live', 'off'); row.append(timer);
-  }
-}
+
+
+
+
+
+
+
+
 const cancelledStarts = new Set<string>();
 function pendingComposerInput(): InputEntry | undefined {
   return [...startingInputs.values(), ...pendingComposerInputs].find(entry => (!queuedFollowup(entry) || entry.state === 'browser') && ['queued', 'browser'].includes(entry.state) &&
@@ -895,7 +822,6 @@ function pendingComposerInput(): InputEntry | undefined {
 }
 let durationTimer: number | undefined;
 function paintDeliveryControls(): void {
-  paintGoalProgress();
   const working = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledTurnId !== null;
   const queueAtFinish = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledQueueAtFinish;
   const canInject = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledCanInject;
@@ -904,11 +830,6 @@ function paintDeliveryControls(): void {
   const nativeFiles = files.some(file => 'id' in file) && !(canInject && injectableAttachments(files));
   $('queueAtFinish').hidden = !queueAtFinish || nativeFiles;
   ui($('afterTurnLabel'), 'textContent', () => queueAtFinish && !nativeFiles ? t("Queue at Session finish") : t("After this turn"));
-  const generate = $<HTMLButtonElement>('generateFinishGoal');
-  const queued = [...startingInputs.values(), ...pendingComposerInputs].some(entry =>
-    (entry.sessionId ?? entry.deliveredSessionId) === selectedId && ['queued', 'browser', 'tool'].includes(entry.state));
-  generate.hidden = !working || !controlledFinishWaiting || queued || controlledStopPending || !!finishGoalDraftView;
-  generate.disabled = generate.dataset.busy === `${selectedId}:${controlledTurnId}`;
   const sendOption = $<HTMLSelectElement>('sendMode').querySelector('option[value="auto"]');
   const immediateLabel = () => nativeFiles && working ? t("After this turn") : canSendDirectly ? t("Send directly") : canInject ? t("Inject now") : t("Send");
   if (sendOption) ui(sendOption, 'textContent', immediateLabel);
@@ -948,23 +869,7 @@ function dockAction(label: string | (() => string), symbol: string, click: (even
   button.type = 'button'; ui(button, 'title', description); ui(button, 'aria-label', description);
   button.append(icon(symbol)); button.onclick = click; return button;
 }
-function paintActiveGoal(): void {
-  const row = $('activeGoalRow');
-  const mode = $<HTMLSelectElement>('chatAutomation').value;
-  row.hidden = !selectedId || mode === 'off';
-  if (row.hidden) { row.replaceChildren(); return; }
-  const objective = $<HTMLTextAreaElement>('sessionObjective').value.trim();
-  const label = el('span', 'queue-label', () => `${mode === 'loop' ? t("Loop") : t("Pursuing goal")}${objective ? ' · ' + objective : ''}`);
-  label.title = objective;
-  row.replaceChildren(icon('i-pulse'), label,
-    dockAction(() => t("Pause automation"), 'i-power', () => { const select = $<HTMLSelectElement>('chatAutomation'); select.value = 'off'; select.dispatchEvent(new Event('change')); }),
-    dockAction(() => t("Edit task"), 'i-pencil', event => {
-      // This opener is outside the menu; its click must not immediately dismiss it.
-      event.stopPropagation();
-      $<HTMLDetailsElement>('composerSettings').open = true;
-      $<HTMLTextAreaElement>('sessionObjective').focus();
-    }));
-}
+
 type TaskPlanDraft = { text: string; requestId: string | null; stages: string[] | null; sending: boolean; progress: TaskProgress | null; error: string | null };
 // Planning belongs to its draft key. Completed stages own their captured objective
 // independently of composer edits; existing sessions hand them to the durable queue.
@@ -987,18 +892,25 @@ function paintTaskPlan(): void {
   if (plan?.stages) paintPreparedPlan();
   else if (plan?.error) {
     const failure = plan.error;
-    const error = el('div', 'muted', () => failure === 'invalid_goal_decision_json' ? t("The planner response could not be read.") : goalErrorMessage(failure));
+    const error = el('div', 'muted', () => taskErrorMessage(failure));
     error.title = plan.error;
     preview.append(error, el('div', 'muted', () => t("Send again to retry, or cancel the plan.")));
   } else if (plan?.requestId) {
     const progress = plan.progress;
     const label = () => !progress ? t("Creating plan…") : progress.phase === 'retrying' ? t("Provider busy · retry {0}{1}", [progress.attempt ?? '', progress.retryAt ? t(' at {0}', [new Date(progress.retryAt).toLocaleTimeString()]) : '']) : progress.phase === 'cancelled' ? t("Plan cancelled") : progress.phase === 'preparing' ? t("Preparing plan…") : progress.phase === 'ready' ? t("Plan ready") : progress.phase === 'failed' ? t("Plan failed") : t("Writing plan…");
     preview.append(el('span', 'muted', label));
-    if (progress?.text || progress?.error) preview.append(el('pre', 'task-progress-text', progress.error ? goalErrorMessage(progress.error) : progress.text));
+    if (progress?.text || progress?.error) preview.append(el('pre', 'task-progress-text', progress.error ? taskErrorMessage(progress.error) : progress.text));
   }
   paintTaskActions(); paintDeliveryControls();
 }
-async function createTaskPlan(backend: 'api' | 'chatgpt'): Promise<void> {
+function taskErrorMessage(error: string): string {
+  if (error === 'invalid_plan_json') return t("The planner response could not be read.");
+  if (error === 'decision_browser_busy') return t("The planner is busy. Try again in a moment.");
+  if (error === 'decision_browser_cancelled') return t("Plan generation was cancelled.");
+  if (error === 'decision_browser_send_unconfirmed' || error === 'decision_browser_send_failed') return t("The planner could not confirm delivery. Try again.");
+  return error.replace(/[_-]+/g, ' ');
+}
+async function createTaskPlan(): Promise<void> {
   const input = $<HTMLTextAreaElement>('chatInput'), text = authoredComposerText().trim();
   const key = draftKey();
   cancelTaskPlan(key);
@@ -1014,7 +926,7 @@ async function createTaskPlan(backend: 'api' | 'chatgpt'): Promise<void> {
     if (draftKey() === key) paintTaskPlan();
   });
   try {
-    const result = await api.draftTaskPlan(text, backend, requestId);
+    const result = await api.draftTaskPlan(text, requestId);
     if (!current()) return;
     const draft = draftKey() === key ? authoredComposerText() : inputDrafts.get(key) ?? '';
     if (draft.trim() !== text) { cancelTaskPlan(key); return; }
@@ -1108,15 +1020,6 @@ async function queuePreparedPlan(key: string, plan: TaskPlanDraft & { stages: st
   }
 }
 function paintTaskActions(): void {
-  const objective = $<HTMLTextAreaElement>('sessionObjective');
-  const save = $<HTMLButtonElement>('saveSessionObjective');
-  const off = $<HTMLSelectElement>('chatAutomation').value === 'off';
-  objective.hidden = off;
-  document.querySelector<HTMLLabelElement>('label[for="sessionObjective"]')!.hidden = off;
-  save.hidden = off;
-  const saved = objective.dataset.saved === objective.value && !!objective.value.trim();
-  save.disabled = objective.disabled || !objective.value.trim() || save.dataset.busy === 'true' || saved;
-  ui(save.querySelector('span')!, 'textContent', () => save.dataset.busy === 'true' ? t("Saving…") : saved ? t("Saved") : t("Save task"));
   const text = authoredComposerText().trim();
   for (const id of ['createPlan']) {
     const button = $<HTMLButtonElement>(id);
@@ -1129,29 +1032,9 @@ function paintTaskActions(): void {
     ui(button, 'title', () => planMode ? t("Return to a normal message; keep your draft") : text ? t("Split your message into editable stages") : t("Write a message in the composer first"));
   }
 }
-function paintLoopDelivery(): void {
-  const model = confirmedComposerModel();
-  $('loopDeliveryRow').hidden = deps.state()?.config.ui.finishTool !== true || !model ||
-    !supportsFinishAutomation($<HTMLSelectElement>('chatAutomation').value as InputAutomation, model.model, model.reasoningEffort);
-}
-function openingLoopDelivery(): boolean | undefined {
-  return selectedId === null ? $<HTMLSelectElement>('loopDelivery').value === 'after-turn' : undefined;
-}
-function paintAutomationSwitch(): void {
-  paintLoopDelivery();
-  paintGoalProgress();
-  paintActiveGoal();
-  const select = $<HTMLSelectElement>('chatAutomation');
-  for (const button of $('automationSwitch').querySelectorAll<HTMLButtonElement>('[data-mode]')) {
-    button.setAttribute('aria-checked', String(button.dataset.mode === select.value));
-    button.disabled = select.disabled;
-  }
-  $<HTMLSelectElement>('sessionObjectiveMode').value = select.value === 'loop' ? 'loop' : 'goal';
-  const loop = select.value === 'loop';
-  ui(document.querySelector('label[for="sessionObjective"]')!, 'textContent', () => loop ? t("Loop instructions") : t("Goal"));
-  ui($<HTMLTextAreaElement>('sessionObjective'), 'placeholder', () => loop ? t("What should each continuation focus on?") : t("What should this chat achieve?"));
-  paintTaskActions();
-}
+
+
+
 async function refreshSessionControls(): Promise<void> {
   const id = selectedId, generation = ++controlsGeneration;
   const planHost = $('agentPlan');
@@ -1163,26 +1046,19 @@ async function refreshSessionControls(): Promise<void> {
     ui($('sessionControlStatus'), 'textContent', () => '');
     for (const action of ['compactSession', 'cancelCompaction']) $(action).hidden = true;
   }
-  paintAutomationSwitch();
+  paintTaskActions();
   if (!id) { controlledSessionId = null; controlledTurnId = null; paintDeliveryControls(); menu.hidden = false;
-    $<HTMLTextAreaElement>('sessionObjective').disabled = false;
     paintTaskActions();
     for (const action of ['compactSession', 'cancelCompaction']) $(action).hidden = true;
     return; }
-  const opening = pendingComposerInputs.find(row => row.opening && row.sessionId === id && ['queued', 'browser'].includes(row.state));
   if (!sessions.find(row => row.id === id)?.conversationId) {
     controlledSessionId = id; controlledSelection = selectionGeneration; controlledTurnId = null;
     controlledCanInject = false; controlledCanSendDirectly = false; controlledQueueAtFinish = false;
-    controlledStopPending = false; controlledFinishWaiting = false;
+    controlledStopPending = false;
     menu.hidden = false;
-    goalDraftView = null; goalWaitView = null; finishGoalDraftView = null; controlledRecovery = [];
-    $<HTMLSelectElement>('chatAutomation').value = opening?.automation ?? 'off';
-    $<HTMLSelectElement>('loopDelivery').value = opening?.loopAfterTurn ? 'after-turn' : 'finish';
-    const objective = $<HTMLTextAreaElement>('sessionObjective');
-    objective.value = opening?.objective ?? ''; objective.disabled = true;
-    objective.dataset.sessionId = id;
+    controlledRecovery = [];
     for (const action of ['compactSession', 'cancelCompaction']) $(action).hidden = true;
-    paintAutomationSwitch(); paintDeliveryControls();
+    paintTaskActions(); paintDeliveryControls();
     return;
   }
   const controls = await run(api.getSessionControls(id));
@@ -1191,11 +1067,7 @@ async function refreshSessionControls(): Promise<void> {
   controlledSessionId = id;
   controlledSelection = selectionGeneration;
   controlledTurnId = controls?.activeTurnId ?? null;
-  goalDraftView = controls?.goalDraft ?? null;
-  goalWaitView = controls?.goalWait ?? null;
-  finishGoalDraftView = controls?.finishGoalDraft ?? null;
   controlledStopPending = controls?.stopPending === true;
-  controlledFinishWaiting = controls?.finishWaiting === true;
   controlledQueueAtFinish = controls?.queueAtFinish === true;
   controlledCanInject = controls?.canInject ?? controlledTurnId !== null;
   controlledCanSendDirectly = controls?.canSendDirectly === true;
@@ -1205,21 +1077,7 @@ async function refreshSessionControls(): Promise<void> {
   menu.hidden = !controls;
   $('compactSession').hidden = false;
   if (!controls) return;
-  const objective = $<HTMLTextAreaElement>('sessionObjective');
-  if (objective.dataset.sessionId !== id || !objective.dataset.edited) {
-    objective.value = controls.objective;
-    objective.dataset.saved = controls.objective;
-    objective.dataset.sessionId = id;
-    delete objective.dataset.edited;
-    $<HTMLSelectElement>('sessionObjectiveMode').value = controls.automation === 'loop' ? 'loop' : 'goal';
-  }
-  objective.disabled = !!controls.blocked;
   paintTaskActions();
-  const draftMode = $<HTMLSelectElement>('chatAutomation');
-  if (!draftMode.dataset.edited) draftMode.value = controls.automation;
-  if (!$<HTMLSelectElement>('loopDelivery').disabled)
-    $<HTMLSelectElement>('loopDelivery').value = controls.loopAfterTurn ? 'after-turn' : 'finish';
-  paintAutomationSwitch();
   $<HTMLButtonElement>('compactSession').disabled = !!controls.blocked || !!controls.job?.busy;
   $('cancelCompaction').hidden = !controls.job?.busy;
   ui($('sessionControlStatus'), 'textContent', () => controls.blocked === 'worker' ? t("This sub-agent is managed by its prime.") : controls.blocked === 'blocked' ? t("This chat is blocked.") : controls.job?.busy ? t("Compaction is running in ChatGPT.") : '');
@@ -2695,9 +2553,7 @@ function paintStateLine(): void {
   // Running state and timer ownership cannot depend on a translated label.
   note.classList.toggle('is-working', working === true);
   const recovering = paintRecoveryStatus();
-  const goalWaiting = controlledSessionId === selectedId && controlledSelection === selectionGeneration && !!goalWaitView;
-  if (goalWaiting) paintGoalProgress();
-  if (visible && (ticking || recovering || goalWaiting)) durationTimer = window.setTimeout(paintStateLine, 1000);
+  if (visible && (ticking || recovering)) durationTimer = window.setTimeout(paintStateLine, 1000);
   repaintBadges();
 }
 
@@ -2873,7 +2729,6 @@ export function chatSettingsPatch(current: Config): {
   sessions: Config['sessions'];
   compaction: Config['compaction'];
   multiAgent: Config['multiAgent'];
-  goal: Config['goal'];
   mcp: Config['mcp'];
 } {
   const number = (id: string, fallback: number, min: number, max: number): number => {
@@ -2904,153 +2759,9 @@ export function chatSettingsPatch(current: Config): {
       allowUnattributedCalls: $<HTMLInputElement>('allowUnattributedCalls').checked,
       recoverAgentTabs: false
     },
-    goal: {
-      enabled: current.goal.enabled, mode: current.goal.mode,
-      includeToolCalls: $<HTMLInputElement>('goalIncludeToolCalls').checked,
-      backend: $<HTMLSelectElement>('goalBackend').value as Config['goal']['backend'],
-      loopBackend: $<HTMLSelectElement>('loopBackend').value as Config['goal']['loopBackend'],
-      helperModel: $<HTMLSelectElement>('helperModel').value || current.goal.helperModel || 'gpt-5.6-sol',
-      helperReasoning: ($<HTMLSelectElement>('helperReasoning').value || current.goal.helperReasoning || 'high') as Config['goal']['helperReasoning'],
-      provider: {
-        kind: ($<HTMLSelectElement>('goalProvider').value || current.goal.provider?.kind || 'openrouter') as Config['goal']['provider']['kind'],
-        baseUrl: $<HTMLInputElement>('goalBaseUrl').value
-      },
-      // The api-backend model is picked from the catalogue and never typed, except on a
-      // custom endpoint whose id is typed in its own field instead. `current` is the
-      // fallback for the first save after a repaint.
-      model:
-        $<HTMLSelectElement>('goalProvider').value === 'custom'
-          ? $<HTMLInputElement>('goalCustomModel').value.trim() || current.goal.model
-          : goalModel || current.goal.model,
-      reasoning: $<HTMLSelectElement>('goalReasoning').value as Config['goal']['reasoning'],
-      // Blank means "restore the safe default", not "send an unconstrained system message".
-      prompt: $<HTMLTextAreaElement>('goalPrompt').value.trim() || DEFAULT_GOAL_SYSTEM_PROMPT,
-      objectivePrompt:
-        $<HTMLTextAreaElement>('goalObjectivePrompt').value.trim() ||
-        DEFAULT_GOAL_OBJECTIVE_SYSTEM_PROMPT,
-      loopPrompt:
-        $<HTMLTextAreaElement>('goalLoopPrompt').value.trim() || DEFAULT_GOAL_LOOP_SYSTEM_PROMPT
-    },
     // The retired editor no longer owns this stored configuration.
     mcp: current.mcp ?? { instructions: '' }
   };
-}
-
-// --------------------------------------------------------------- the goal loop
-
-/**
- * The OpenRouter model this panel currently has chosen.
- *
- * Kept beside the controls rather than in one, because the picker is a list that is not
- * loaded most of the time: an `<input>` would have to hold an id nobody typed, and a
- * `<select>` would have to hold several hundred options nobody asked for.
- */
-let goalModel = DEFAULT_GOAL_MODEL;
-/** The catalogue as far as it has been paged in, and how long it actually is. */
-let goalModels: GoalModel[] = [];
-let selectedGoalModel: GoalModel | undefined;
-let goalCatalogEpoch = 0;
-let goalTotal = 0;
-let goalLoading = false;
-
-function invalidateGoalModels(): void {
-  goalCatalogEpoch++;
-  goalModels = [];
-  selectedGoalModel = undefined;
-  goalTotal = 0;
-}
-
-function paintGoalReasoning(selected?: Config['goal']['reasoning'], changingModel = false): void {
-  const select = $<HTMLSelectElement>('goalReasoning');
-  const model = goalModels.find(model => model.id === goalModel) ?? (selectedGoalModel?.id === goalModel ? selectedGoalModel : undefined);
-  const custom = $<HTMLSelectElement>('goalProvider').value === 'custom';
-  renderGoalReasoning(select, custom ? undefined : model, custom,
-    selected ?? (select.value || 'default') as Config['goal']['reasoning'], changingModel);
-}
-
-/** The release date OpenRouter publishes, as a person would date a model. */
-function releasedOn(created: number): string {
-  if (!created) return t("release date not published");
-  return new Date(created * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-}
-
-/**
- * Loads the next twenty models, newest first.
- *
- * Paged rather than fetched whole because the catalogue is several hundred entries long and
- * the question this list answers — what is new — is answered by the first screen of it.
- */
-async function loadGoalModels(reset: boolean): Promise<void> {
-  if (goalLoading) return;
-  goalLoading = true;
-  if (reset) {
-    invalidateGoalModels();
-  }
-  const epoch = goalCatalogEpoch;
-  ui($('goalModelsState'), 'textContent', () => t("Loading models from OpenRouter…"));
-  $<HTMLButtonElement>('goalMore').disabled = true;
-  const page = await run(api.listGoalModels(goalModels.length));
-  goalLoading = false;
-  if (epoch !== goalCatalogEpoch) return;
-  if (!page) {
-    // `run` has already shown the reason. Say what it means *here*: the list is empty and
-    // the model in use has not changed.
-    ui($('goalModelsState'), 'textContent', () => t("OpenRouter could not be reached. The model in use is unchanged."));
-    $<HTMLButtonElement>('goalMore').disabled = goalModels.length === 0;
-    return;
-  }
-  goalModels = [...goalModels, ...page.models];
-  selectedGoalModel = page.selectedModel;
-  goalTotal = page.total;
-  paintGoalReasoning();
-  paintGoalModels();
-}
-
-function paintGoalModels(): void {
-  const list = $('goalModelList');
-  // Emptying an element scrolls it back to the top, and this repaints the whole list every
-  // time a page lands. Without holding the offset, paging in the next twenty threw the
-  // reader back to the newest model — which is the one place they had already decided
-  // against by scrolling away from it.
-  const keep = list.scrollTop;
-  list.textContent = '';
-  for (const model of goalModels) {
-    const row = el('button', 'goal-model');
-    row.setAttribute('type', 'button');
-    row.dataset.model = model.id;
-    if (model.id === goalModel) row.dataset.chosen = '1';
-    row.append(el('b', 'goal-model-name', model.name));
-    const meta = [releasedOn(model.created), model.contextLength > 0 ? t("{0} ctx", [compactNumber(model.contextLength)]) : '']
-      .filter(Boolean)
-      .join(' · ');
-    row.append(el('em', 'goal-model-meta', `${model.id} · ${meta}`));
-    list.append(row);
-  }
-  const shown = goalModels.length;
-  ui($('goalModelsState'), 'textContent', () => shown === 0 ? t("No models came back.") : t("Showing the {0} newest of {1}, newest release first.", [shown, goalTotal]));
-  $<HTMLButtonElement>('goalMore').disabled = shown >= goalTotal;
-  $<HTMLButtonElement>('goalMore').hidden = shown >= goalTotal;
-  list.scrollTop = keep;
-  // A page that did not fill the box leaves nothing to scroll, so the scroll handler can
-  // never fire and the list would stop at twenty with more still to come. Ask again here.
-  maybePageGoalModels();
-}
-
-/**
- * Pages the catalogue in as the list is scrolled.
- *
- * "Load 20 more" is the deliberate way to ask; scrolling to the bottom is the way people
- * actually ask. It fires a screenful early rather than at the exact bottom, so the next
- * twenty are usually already in place by the time the scroll arrives where they go.
- */
-function maybePageGoalModels(): void {
-  if (goalLoading || goalModels.length === 0 || goalModels.length >= goalTotal) return;
-  const list = $('goalModelList');
-  // A closed picker measures zero in every direction, which reads as "scrolled to the end"
-  // and would page the whole catalogue in behind a panel nobody has open.
-  if (list.clientHeight === 0) return;
-  if (list.scrollHeight - list.scrollTop - list.clientHeight > GOAL_SCROLL_MARGIN) return;
-  void loadGoalModels(false);
 }
 
 /** Keep an in-progress form edit when an unrelated main-process push carries the old value. */
@@ -3069,181 +2780,6 @@ function applyChatChecked(input: HTMLInputElement, value: boolean, previous: boo
   input.checked = value;
 }
 
-/** Writes the goal block from app state. Called from chatApply, so it never guesses. */
-function applyGoal(state: AppState, previous?: Config): void {
-  const { config } = state;
-  applyChatChecked($<HTMLInputElement>('goalIncludeToolCalls'), config.goal.includeToolCalls === true, previous?.goal.includeToolCalls);
-  const automation = $<HTMLSelectElement>('chatAutomation');
-  automation.disabled = false;
-  ui(automation, 'title', () => t("Continue this chat automatically"));
-  paintAutomationSwitch();
-  const secureStorageAvailable = state.secureStorage?.available ?? true;
-  // This picker owns the last known OpenRouter selection. A custom deployment uses
-  // its own input and must not replace that selection during an unrelated repaint.
-  // A session opened directly on custom starts with the picker's defined default.
-  if (config.goal.provider?.kind !== 'custom') goalModel = config.goal.model;
-  const reasoningSelect = $<HTMLSelectElement>('goalReasoning');
-  const reasoning = document.activeElement === reasoningSelect && previous && reasoningSelect.value !== previous.goal.reasoning
-    ? reasoningSelect.value as Config['goal']['reasoning'] : config.goal.reasoning;
-  if (previous && JSON.stringify(previous.goal.provider) !== JSON.stringify(config.goal.provider)) invalidateGoalModels();
-  applyChatValue($<HTMLTextAreaElement>('goalPrompt'), config.goal.prompt, previous?.goal.prompt);
-  applyChatValue(
-    $<HTMLTextAreaElement>('goalObjectivePrompt'),
-    config.goal.objectivePrompt,
-    previous?.goal.objectivePrompt
-  );
-  applyChatValue(
-    $<HTMLTextAreaElement>('goalLoopPrompt'),
-    config.goal.loopPrompt,
-    previous?.goal.loopPrompt
-  );
-  // Which endpoint the api backend talks to. The key sentence below only applies to
-  // OpenRouter: a custom endpoint is often keyless, so a missing key never means custom.
-  const customProvider = config.goal.provider?.kind === 'custom';
-  const providerBaseUrl = config.goal.provider?.baseUrl ?? '';
-  applyChatValue($<HTMLSelectElement>('goalProvider'), customProvider ? 'custom' : 'openrouter', previous?.goal.provider?.kind);
-  applyChatValue($<HTMLInputElement>('goalBaseUrl'), providerBaseUrl, previous?.goal.provider?.baseUrl);
-  applyChatValue($<HTMLInputElement>('goalCustomModel'), config.goal.model, previous?.goal.model);
-  $('goalCustomPanel').hidden = !customProvider;
-  $('goalPickerRow').hidden = customProvider;
-  if (customProvider) $('goalModels').hidden = true;
-  $('goalKeyField').hidden = customProvider;
-  $('goalModelName').textContent = config.goal.model;
-  const goalKey = $<HTMLInputElement>('goalKey');
-  ui(goalKey, 'placeholder', () => state.hasGoalKey ? t("•••••••• stored") : 'sk-or-v1-…');
-  goalKey.disabled = !secureStorageAvailable;
-  ui($('goalKeyState'), 'textContent', () => !secureStorageAvailable
-    ? (state.secureStorage?.detail ?? t("Secure credential storage is unavailable."))
-    : state.hasGoalKey
-      ? t("A key is stored with secure OS credential storage. Type a new one to replace it.")
-      : t("Stored with secure OS credential storage. It never leaves this app, and the browser is only ever handed the reply."));
-  $('goalKeyState').classList.toggle('is-warn', !secureStorageAvailable);
-  $<HTMLButtonElement>('goalKeyRemove').disabled = !state.hasGoalKey || !secureStorageAvailable;
-  const goalCustomKey = $<HTMLInputElement>('goalCustomKey');
-  ui(goalCustomKey, 'placeholder', () => state.hasCustomProviderKey ? t("•••••••• stored") : t("leave empty for a keyless local server"));
-  goalCustomKey.disabled = !secureStorageAvailable;
-  ui($('goalCustomKeyState'), 'textContent', () => !secureStorageAvailable
-    ? (state.secureStorage?.detail ?? t("Secure credential storage is unavailable."))
-    : state.hasCustomProviderKey
-      ? t("A key is stored with secure OS credential storage. Type a new one to replace it.")
-      : t("Optional. Stored with secure OS credential storage and sent only by the app to your configured API endpoint. The browser receives only the reply."));
-  $('goalCustomKeyState').classList.toggle('is-warn', !secureStorageAvailable);
-  $<HTMLButtonElement>('goalCustomKeyRemove').disabled = !state.hasCustomProviderKey || !secureStorageAvailable;
-  paintGoalReasoning(reasoning);
-  if (goalModels.length > 0) paintGoalModels();
-}
-
-function wireGoal(save: () => Promise<void>): void {
-  $<HTMLTextAreaElement>('goalPrompt').maxLength = MAX_GOAL_SYSTEM_PROMPT_CHARS;
-  $('goalPromptEdit').addEventListener('click', () => {
-    const panel = $('goalPromptPanel');
-    panel.hidden = !panel.hidden;
-    $('goalPromptEdit').textContent = panel.hidden ? 'Edit prompt' : 'Close prompt';
-    if (!panel.hidden) $<HTMLTextAreaElement>('goalPrompt').focus();
-  });
-  $('goalPromptReset').addEventListener('click', async () => {
-    $<HTMLTextAreaElement>('goalPrompt').value = DEFAULT_GOAL_SYSTEM_PROMPT;
-    await save();
-    toast('Goal prompt (no task) restored to default');
-  });
-  $<HTMLTextAreaElement>('goalObjectivePrompt').maxLength = MAX_GOAL_SYSTEM_PROMPT_CHARS;
-  $('goalObjectivePromptEdit').addEventListener('click', () => {
-    const panel = $('goalObjectivePromptPanel');
-    panel.hidden = !panel.hidden;
-    $('goalObjectivePromptEdit').textContent = panel.hidden ? 'Edit prompt' : 'Close prompt';
-    if (!panel.hidden) $<HTMLTextAreaElement>('goalObjectivePrompt').focus();
-  });
-  $('goalObjectivePromptReset').addEventListener('click', async () => {
-    $<HTMLTextAreaElement>('goalObjectivePrompt').value = DEFAULT_GOAL_OBJECTIVE_SYSTEM_PROMPT;
-    await save();
-    toast('Goal prompt (with a task) restored to default');
-  });
-  $<HTMLTextAreaElement>('goalLoopPrompt').maxLength = MAX_GOAL_SYSTEM_PROMPT_CHARS;
-  $('goalLoopPromptEdit').addEventListener('click', () => {
-    const panel = $('goalLoopPromptPanel');
-    panel.hidden = !panel.hidden;
-    $('goalLoopPromptEdit').textContent = panel.hidden ? 'Edit prompt' : 'Close prompt';
-    if (!panel.hidden) $<HTMLTextAreaElement>('goalLoopPrompt').focus();
-  });
-  $('goalLoopPromptReset').addEventListener('click', async () => {
-    $<HTMLTextAreaElement>('goalLoopPrompt').value = DEFAULT_GOAL_LOOP_SYSTEM_PROMPT;
-    await save();
-    toast('Automation prompt restored to default');
-  });
-  // The catalogue is fetched on the first press and kept afterwards: the picker closing is
-  // not a reason to spend another round trip on a list that changes weekly.
-  $('goalPick').addEventListener('click', () => {
-    const panel = $('goalModels');
-    panel.hidden = !panel.hidden;
-    $('goalPick').textContent = panel.hidden ? 'Select model' : 'Close';
-    if (!panel.hidden && goalModels.length === 0) void loadGoalModels(true);
-  });
-  $('goalMore').addEventListener('click', () => void loadGoalModels(false));
-  $('goalReasoning').addEventListener('focus', () => {
-    if ($<HTMLSelectElement>('goalProvider').value !== 'custom' && !goalModels.some(model => model.id === goalModel) && selectedGoalModel?.id !== goalModel)
-      void loadGoalModels(true);
-  });
-  $('goalModelList').addEventListener('scroll', maybePageGoalModels);
-  $('goalModelList').addEventListener('click', (event) => {
-    const row = (event.target as HTMLElement).closest<HTMLElement>('[data-model]');
-    if (!row?.dataset.model) return;
-    goalModel = row.dataset.model;
-    $('goalModelName').textContent = goalModel;
-    paintGoalReasoning(undefined, true);
-    paintGoalModels();
-    void save();
-    toast(`Goal model set to ${goalModel}`);
-  });
-  // On blur, like every other key in this app: not saved keystroke by keystroke, and the
-  // field is emptied the moment it has been handed over.
-  $('goalKey').addEventListener('blur', async () => {
-    const input = $<HTMLInputElement>('goalKey');
-    const submitted = input.value;
-    const key = submitted.trim();
-    // Whitespace is not a key. Passing it through trim as an empty string used to invoke the
-    // remove-key path and then claim a key was stored.
-    if (key === '') return;
-    const next = await run(api.setGoalKey(key));
-    if (next) {
-      invalidateGoalModels();
-      // A blur can be followed immediately by refocus + new typing while IPC is in flight.
-      // Clear only the exact value that successfully crossed the secret-store boundary.
-      if (input.value === submitted) input.value = '';
-      applyGoal(next);
-      toast('OpenRouter key stored');
-    }
-  });
-  $('goalKeyRemove').addEventListener('click', async () => {
-    const next = await run(api.setGoalKey(''));
-    if (next) {
-      invalidateGoalModels();
-      applyGoal(next);
-      toast('OpenRouter key removed');
-    }
-  });
-  // Same blur-to-save discipline as the OpenRouter key above. Empty submits nothing:
-  // a keyless local endpoint is a supported configuration, not a key being removed.
-  $('goalCustomKey').addEventListener('blur', async () => {
-    const input = $<HTMLInputElement>('goalCustomKey');
-    const submitted = input.value;
-    const key = submitted.trim();
-    if (key === '') return;
-    const next = await run(api.setCustomProviderKey(key));
-    if (next) {
-      if (input.value === submitted) input.value = '';
-      applyGoal(next);
-      toast('Custom provider key stored');
-    }
-  });
-  $('goalCustomKeyRemove').addEventListener('click', async () => {
-    const next = await run(api.setCustomProviderKey(''));
-    if (next) {
-      applyGoal(next);
-      toast('Custom provider key removed');
-    }
-  });
-}
-
 /**
  * Every control on the settings sheet, and the whole of it.
  *
@@ -3257,21 +2793,10 @@ const CHAT_INPUTS = [
   'chatBrowser',
   'sessionRecording',
   'sessionRetainDays',
-  'goalIncludeToolCalls',
-  'planBackend',
+  'planModel', 'planReasoning',
   'finishTool', 'finishLeadMinutes', 'workerModel', 'workerReasoning', 'backgroundChats', 'browserOnly', 'autoRefreshPlugins',
-  'goalBackend',
-  'loopBackend',
-  'helperModel', 'helperReasoning',
   'maWorkers',
-  'allowUnattributedCalls',
-  'goalProvider',
-  'goalBaseUrl',
-  'goalCustomModel',
-  'goalReasoning',
-  'goalPrompt',
-  'goalObjectivePrompt',
-  'goalLoopPrompt'
+  'allowUnattributedCalls'
 ];
 
 /** Writes app state into this panel's controls. Called from the renderer's apply(). */
@@ -3292,11 +2817,6 @@ export function chatApply(state: AppState, previous?: Config): void {
 
   applyChatValue($<HTMLSelectElement>('workerModel'), config.multiAgent.defaultModel ?? '', previous?.multiAgent.defaultModel);
   applyChatValue($<HTMLSelectElement>('workerReasoning'), config.multiAgent.defaultReasoning ?? '', previous?.multiAgent.defaultReasoning);
-  applyChatValue($<HTMLSelectElement>('goalBackend'), config.goal.backend ?? 'chatgpt', previous?.goal.backend);
-  applyChatValue($<HTMLSelectElement>('loopBackend'), config.goal.loopBackend ?? 'chatgpt', previous?.goal.loopBackend);
-  applyChatValue($<HTMLSelectElement>('helperModel'), config.goal.helperModel ?? 'gpt-5.6-sol', previous?.goal.helperModel);
-  applyChatValue($<HTMLSelectElement>('helperReasoning'), config.goal.helperReasoning ?? 'high', previous?.goal.helperReasoning);
-  applyGoal(state, previous);
 
   // Extension bridge. Connecting is automatic, so this reports rather than asks.
   const browserRequired = browserExtensionRequired(config);
@@ -3354,8 +2874,7 @@ function scheduleReload(): void {
 
 /** Retired automatic drafts belong to their creation time, never the live composer queue. */
 function historicalAutomaticInput(entry: InputEntry): boolean {
-  return (!!entry.recovery || (!!entry.finishOwner && !entry.finishOwner.userRequested)) &&
-    entry.state === 'cancelled' && !!entry.error;
+  return !!entry.recovery && entry.state === 'cancelled' && !!entry.error;
 }
 
 function inputMessageRow(entry: InputEntry, notice: boolean): HTMLElement {
@@ -3446,7 +2965,7 @@ async function adoptAcceptedOpening(entry: InputEntry): Promise<boolean> {
   const images = imageDrafts.get(from);
   if (images) imageDrafts.set(summary.id, images);
   selectSession(summary.id);
-  inputDrafts.delete(from); imageDrafts.delete(from); newChatTasks.delete(from);
+  inputDrafts.delete(from); imageDrafts.delete(from);
   return true;
 }
 function paintPendingInputs(): void {
@@ -3482,13 +3001,12 @@ function paintPendingInputs(): void {
     if (old?.dataset.inputSignature === sig) return old;
     const row = inputMessageRow(entry, notice(entry)); row.dataset.inputSignature = sig; return row;
   });
-  // Helper controls have their own owner and are refreshed by the queue read below.
-  reconcileChildren(host, [...next, ...host.querySelectorAll<HTMLElement>(':scope > .queued-input')]);
+  reconcileChildren(host, next);
 }
 async function refreshInputQueue(): Promise<void> {
   const request = ++inputQueueGeneration;
   const selection = selectionGeneration;
-  const [all, pausedHelpers] = await Promise.all([run(api.listInputs()), run(api.listPausedHelpers())]);
+  const all = await run(api.listInputs());
   if (!all || selection !== selectionGeneration || request !== inputQueueGeneration) return;
   pendingComposerInputs = all;
   for (const id of dismissedInputNotices) if (!all.some(entry => entry.id === id)) dismissedInputNotices.delete(id);
@@ -3632,31 +3150,15 @@ async function refreshInputQueue(): Promise<void> {
     return card;
   }));
   paintDetail(false);
-  for (const node of $('inputQueue').querySelectorAll(':scope > .queued-input')) node.remove();
-  for (const helper of pausedHelpers ?? []) {
-    if (helper.sourceSessionId !== selectedId) continue;
-    const row = el('div', 'queued-input');
-    row.append(el('span', '', () => t("Helper delivery was not confirmed. Its old chat may still be running.")));
-    const retry = el('button', 'btn', () => t("Start a new helper"));
-    retry.setAttribute('type', 'button');
-    retry.onclick = async () => {
-      retry.setAttribute('disabled', '');
-      const accepted = await run(api.retryHelper(helper.id, helper.sourceSessionId));
-      if (accepted) toast(t("New helper authorized for this chat"));
-      else toast(t("This helper has changed. Refreshing its status."));
-      void refreshInputQueue();
-    };
-    row.append(retry);
-    $('inputQueue').append(row);
-  }
+
 }
 async function retryPlannedInput(entry: InputEntry): Promise<void> {
   if (dismissedInputNotices.has(entry.id) || entry.stagesApplied || !['failed', 'cancelled'].includes(entry.state)) return;
   // The outbox retains the authored workflow after failure. Retry that payload, not
   // its stage-one display text, and never revive the old browser claim/receipt.
-  const { sessionId, projectId, text, objective, stages, images, attachments, attachmentDelivery, automation, loopAfterTurn, model, reasoningEffort, afterTurn } = entry;
+  const { sessionId, projectId, text, objective, stages, images, attachments, attachmentDelivery, model, reasoningEffort, afterTurn } = entry;
   const args: InputArgs = { id: crypto.randomUUID(), sessionId, projectId, text, objective, stages, images, attachments, attachmentDelivery,
-    automation, loopAfterTurn, model, reasoningEffort, afterTurn, mode: entry.requestedMode ?? entry.mode, dueAt: Date.now() };
+    model, reasoningEffort, afterTurn, mode: entry.requestedMode ?? entry.mode, dueAt: Date.now() };
   const generation = selectionGeneration;
   // Hide during the attempt, but persist dismissal only after its replacement is durable.
   dismissedInputNotices.add(entry.id); void refreshInputQueue();
@@ -3749,7 +3251,7 @@ async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?
     ...(chosenMode === 'tool' && !plan ? { delivery: 'tool' as const } : {}),
     ...(mode === 'auto' && !plan && selectedId && controlledSessionId === selectedId && controlledSelection === generation &&
       controlledCanInject && images.some(file => 'id' in file) && injectableAttachments(images) ? { attachmentDelivery: 'tool' as const } : {}) };
-  const objective = plan ? planObjective : mode === 'finish' ? undefined : $<HTMLTextAreaElement>('sessionObjective').value.trim() || undefined;
+  const objective = plan ? planObjective : undefined;
   const authoredSource = plan ? 'objective' as const : 'text' as const;
   startingInputs.set(id, { id, sessionId, projectId, text, ...attachmentPayload, stages: plan?.slice(1), objective, authoredSource, mode: mode === 'finish' ? 'finish' : mode === 'auto' ? 'auto' : 'after-turn',
     dueAt, ...modelSettings, state: 'queued', owner: null, createdAt: dueAt, conversationId: null });
@@ -3761,7 +3263,7 @@ async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?
   void refreshInputQueue();
   paintDeliveryControls();
   try {
-    const result = await run(api.sendInput({ id, sessionId, projectId, text, ...attachmentPayload, stages: plan?.slice(1), objective, authoredSource, automation: mode === 'finish' ? undefined : $<HTMLSelectElement>('chatAutomation').value as InputAutomation, loopAfterTurn: openingLoopDelivery(), mode: mode === 'finish' ? 'finish' : mode === 'auto' ? 'auto' : 'after-turn', dueAt, ...modelSettings }));
+    const result = await run(api.sendInput({ id, sessionId, projectId, text, ...attachmentPayload, stages: plan?.slice(1), objective, authoredSource, mode: mode === 'finish' ? 'finish' : mode === 'auto' ? 'auto' : 'after-turn', dueAt, ...modelSettings }));
     if (cancelledStarts.has(id)) return;
     if (!result) {
       // A disk failure after outbox commit still owns this input. Keep its exact
@@ -3785,9 +3287,6 @@ async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?
     // that durable row visible while the next listing crosses the process boundary.
     inputQueueGeneration++;
     pendingComposerInputs = [...pendingComposerInputs.filter(row => row.id !== result.id), result];
-    if (sessionId === null && selectionGeneration === generation && pendingNewInput?.id === id && result.automation &&
-        ($<HTMLSelectElement>('chatAutomation').value !== result.automation || openingLoopDelivery() !== result.loopAfterTurn))
-      await run(api.setInputAutomation(result.id, $<HTMLSelectElement>('chatAutomation').value as InputAutomation, openingLoopDelivery()));
     if (sessionId === null && selectionGeneration === generation) {
       pendingNewInput = { id: result.id, generation };
       await adoptAcceptedOpening(result);
@@ -3915,7 +3414,6 @@ export function initChat(next: Deps): void {
     }
   });
   initChatModels(() => {
-    paintLoopDelivery();
     const config = deps.state()?.config;
     if (config) paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
   });
@@ -3932,130 +3430,6 @@ export function initChat(next: Deps): void {
     $<HTMLSelectElement>('sendMode').value = button.dataset.delivery!;
     paintDeliveryControls();
   });
-  $('automationSwitch').addEventListener('click', (event) => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-mode]');
-    if (!button || button.disabled) return;
-    const select = $<HTMLSelectElement>('chatAutomation');
-    select.value = button.dataset.mode!;
-    select.dispatchEvent(new Event('change'));
-  });
-  $('chatAutomation').addEventListener('change', async () => {
-    goalIntentGeneration++;
-    const select = $<HTMLSelectElement>('chatAutomation');
-    cancelGoalRequest();
-    if (select.value === 'off') goalDraftView = null;
-    select.dataset.edited = 'true'; paintAutomationSwitch();
-    const id = selectedId, generation = selectionGeneration;
-    const mode = select.value as InputAutomation;
-    const opening = id && pendingComposerInputs.find(row => row.sessionId === id && row.opening && !row.deliveredAt && ['queued', 'browser'].includes(row.state));
-    if (opening) {
-      inputQueueGeneration++;
-      opening.automation = mode;
-      await run(api.setInputAutomation(opening.id, mode));
-      void refreshInputQueue(); return;
-    }
-    if (!id) {
-      const pending = pendingNewInput;
-      if (pending?.generation === generation) await run(api.setInputAutomation(pending.id, mode));
-      return;
-    }
-    select.disabled = true; paintAutomationSwitch();
-    try { await run(api.setSessionAutomation(id, mode)); }
-    finally {
-      select.disabled = false;
-      if (id === selectedId && generation === selectionGeneration) { delete select.dataset.edited; void refreshSessionControls(); }
-      paintAutomationSwitch();
-    }
-  });
-  $('loopDelivery').addEventListener('change', async () => {
-    const id = selectedId, generation = selectionGeneration;
-    const select = $<HTMLSelectElement>('loopDelivery');
-    const opening = id && pendingComposerInputs.find(row => row.sessionId === id && row.opening && !row.deliveredAt && ['queued', 'browser'].includes(row.state));
-    if (opening) {
-      inputQueueGeneration++;
-      opening.loopAfterTurn = select.value === 'after-turn';
-      opening.automation = $<HTMLSelectElement>('chatAutomation').value as InputAutomation;
-      await run(api.setInputAutomation(opening.id, opening.automation, opening.loopAfterTurn));
-      void refreshInputQueue(); return;
-    }
-    if (!id) {
-      const pending = pendingNewInput;
-      if (pending?.generation === generation)
-        await run(api.setInputAutomation(pending.id, $<HTMLSelectElement>('chatAutomation').value as InputAutomation, select.value === 'after-turn'));
-      return;
-    }
-    select.disabled = true;
-    try { await run(api.setSessionAutomation(id, $<HTMLSelectElement>('chatAutomation').value as InputAutomation, select.value === 'after-turn')); }
-    finally {
-      select.disabled = false;
-      if (id === selectedId && generation === selectionGeneration) void refreshSessionControls();
-    }
-  });
-  $('sessionObjective').addEventListener('input', () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); });
-  $('sessionObjectiveMode').addEventListener('change', () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); });
-  for (const buttonId of ['saveSessionObjective'] as const) {
-    $(buttonId).addEventListener('click', async () => {
-      const id = selectedId;
-      const objective = $<HTMLTextAreaElement>('sessionObjective');
-      if (!id) {
-        const draft = objective.value, mode = $<HTMLSelectElement>('sessionObjectiveMode').value as 'goal' | 'loop';
-        if (!draft.trim()) return;
-        const settings = confirmedComposerModel();
-        if (!settings) { toast('Reload model choices and select an available model and thinking effort before sending.'); return; }
-        const selection = selectionGeneration, intent = goalIntentGeneration, requestId = crypto.randomUUID();
-        const projectId = selectedProjectId;
-        const { model, reasoningEffort } = settings;
-        const automation = $<HTMLSelectElement>('chatAutomation');
-        automation.value = mode;
-        automation.dataset.edited = 'true'; paintAutomationSwitch();
-        goalProgress = { requestId, selection, phase: 'preparing', text: '' };
-        const button = $<HTMLButtonElement>(buttonId); button.dataset.busy = 'true'; paintTaskActions(); paintGoalProgress();
-        const current = () => selectedId === null && selectionGeneration === selection && goalIntentGeneration === intent && objective.value === draft && automation.value === mode;
-        try {
-          const result = await api.draftGoalOpening(draft.trim(), mode, requestId);
-          const opening = result.ok ? result.data : null;
-          if (!result.ok && current() && goalProgress?.requestId === requestId) goalProgress.error = result.error;
-          if (!current()) { if (goalProgress?.requestId === requestId) { goalProgress.phase = 'paused'; paintGoalProgress(); } return; }
-          if (!opening) { if (goalProgress?.requestId === requestId) { goalProgress.phase = 'failed'; goalProgress.error ||= 'Opening message generation failed'; paintGoalProgress(); } return; }
-          const dueAt = Date.now(), inputId = crypto.randomUUID();
-          const entry: InputEntry = { id: inputId, sessionId: null, projectId, text: opening.reply, objective: draft.trim(), authoredSource: 'objective', automation: mode,
-            loopAfterTurn: openingLoopDelivery(),
-            mode: 'auto', dueAt, model, reasoningEffort, state: 'queued', owner: null, createdAt: dueAt, conversationId: null };
-          startingInputs.set(inputId, entry); pendingNewInput = { id: inputId, generation: selection };
-          goalProgress = { requestId, selection, inputId, phase: 'queued', text: '' }; paintDeliveryControls();
-          try {
-            const accepted = await run(api.sendInput(entry));
-            if (accepted) { inputQueueGeneration++; pendingComposerInputs = [...pendingComposerInputs.filter(row => row.id !== inputId), accepted];
-              // Off may arrive while sendInput is still validating/enqueuing, before
-              // the outbox row exists. Reconcile that same pending intent after acceptance.
-              if (selectionGeneration === selection && pendingNewInput?.id === inputId &&
-                  (automation.value !== mode || openingLoopDelivery() !== entry.loopAfterTurn))
-                await run(api.setInputAutomation(inputId, automation.value as InputAutomation, openingLoopDelivery()));
-              await adoptAcceptedOpening(accepted);
-              if (current()) objective.dataset.saved = draft;
-            } else if (goalProgress?.requestId === requestId) { goalProgress.phase = 'failed'; goalProgress.error = 'Opening message could not be queued'; }
-          } finally { startingInputs.delete(inputId); paintDeliveryControls(); void refreshInputQueue(); }
-        } finally { delete button.dataset.busy; paintTaskActions(); }
-        return;
-      }
-      if (objective.dataset.sessionId !== id) return;
-      const selection = selectionGeneration, draft = objective.value;
-      const text = objective.value.trim();
-      if (!text) return;
-      const mode = $<HTMLSelectElement>('sessionObjectiveMode').value as 'goal' | 'loop';
-      const button = $<HTMLButtonElement>(buttonId); button.dataset.busy = 'true'; paintTaskActions();
-      const requestId = crypto.randomUUID(); goalProgress = { requestId, selection, phase: 'saving', text: '' }; paintGoalProgress();
-      try {
-        const saved = await run(api.setSessionObjective(id, text, mode));
-        if (goalProgress?.requestId === requestId) { goalProgress.phase = saved ? 'saved' : 'failed'; if (!saved) goalProgress.error = 'Task could not be saved'; paintGoalProgress(); }
-        if (saved && selectedId === id && selectionGeneration === selection && objective.value === draft &&
-            $<HTMLSelectElement>('sessionObjectiveMode').value === mode) { delete objective.dataset.edited; objective.dataset.saved = objective.value; }
-      } finally {
-        delete button.dataset.busy; paintTaskActions();
-        if (selectedId === id) void refreshSessionControls();
-      }
-    });
-  }
   for (const [buttonId, cancel] of [['compactSession', false], ['cancelCompaction', true]] as const) {
     $(buttonId).addEventListener('click', async () => {
       const id = selectedId; if (!id) return;
@@ -4095,22 +3469,8 @@ export function initChat(next: Deps): void {
     list: scope => api.skillLibrary(scope), command: name => {
       if (name === 'plan') { $('createPlan').click(); return; }
       if (name === 'compact') { $('compactSession').click(); return; }
-      const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = name;
-      automation.dispatchEvent(new Event('change', { bubbles: true }));
     } });
   skillPicker.restore();
-  $('generateFinishGoal').addEventListener('click', async () => {
-    const button = $<HTMLButtonElement>('generateFinishGoal'), id = selectedId, turnId = controlledTurnId;
-    if (!id || !turnId || button.hidden || button.disabled || controlledSessionId !== id || controlledSelection !== selectionGeneration) return;
-    const owner = `${id}:${turnId}`;
-    button.dataset.busy = owner; paintDeliveryControls();
-    try { await run(api.generateFinishGoal(id, turnId)); }
-    finally {
-      if (button.dataset.busy === owner) delete button.dataset.busy;
-      if (selectedId === id) void refreshSessionControls();
-      else paintDeliveryControls();
-    }
-  });
   $('composer').addEventListener('dragover', event => {
     if (!event.dataTransfer?.types.some(type => type === 'text/plain') || event.dataTransfer.types.includes('Files')) return;
     event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
@@ -4183,8 +3543,8 @@ export function initChat(next: Deps): void {
   });
   $('composerSettings').addEventListener('toggle', paintTaskActions);
   initContextMeter();
-  $('createPlan').addEventListener('click', () => { if (taskPlans.has(draftKey())) cancelTaskPlan(); else void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); });
-  $('composer').addEventListener('submit', (event) => { event.preventDefault(); if (currentPreparedPlan()) void sendPreparedPlan(); else if (taskPlans.has(draftKey())) { if (!$('createPlan').dataset.busy) void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); } else void sendComposer(); });
+  $('createPlan').addEventListener('click', () => { if (taskPlans.has(draftKey())) cancelTaskPlan(); else void createTaskPlan(); });
+  $('composer').addEventListener('submit', (event) => { event.preventDefault(); if (currentPreparedPlan()) void sendPreparedPlan(); else if (taskPlans.has(draftKey())) { if (!$('createPlan').dataset.busy) void createTaskPlan(); } else void sendComposer(); });
 
   $('sessionList').addEventListener('click', (event) => {
     const row = (event.target as HTMLElement).closest<HTMLElement>('[data-id]');
@@ -4279,7 +3639,6 @@ export function initChat(next: Deps): void {
     $(id).addEventListener('change', () => void deps.save());
   }
 
-  wireGoal(() => deps.save());
 
   $('bridgeUnpair').addEventListener('click', async () => {
     const state = await run(api.unpairExtension());
@@ -4291,9 +3650,5 @@ export function initChat(next: Deps): void {
   });
 
   api.onSessionChanged(scheduleReload);
-  api.onTaskProgress(progress => {
-    if (!goalProgress || progress.requestId !== goalProgress.requestId || goalProgress.selection !== selectionGeneration) return;
-    Object.assign(goalProgress, progress); paintGoalProgress();
-  });
   api.onSwarmChanged(paintSwarm);
 }

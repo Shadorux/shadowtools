@@ -330,8 +330,6 @@ export type SessionEvent =
       state?: MessageState;
       /** Compatibility mirror for older consumers; equivalent to state === 'final'. */
       final: boolean;
-      /** This exact stable reply was proven terminal and may enter Goal policy. */
-      goalEligible?: boolean;
       /** Store-owned sequence of the latest final text/state change; rendering/metadata cannot advance it. */
       finalContentSeq?: number;
       /** Local acceptance time of final content; provider time can predate its last tools. */
@@ -380,7 +378,7 @@ export type SessionEvent =
    * event written before this model existed, or by a page whose commentary had no readable
    * identity, is still a plain standalone caption.
    */
-  | (BaseEvent & { kind: 'progress'; message: StoredText; progressId?: string; origin?: number; finishControl?: { state: 'released' | 'notified' | 'decision'; conversationId: string; revision?: string; inputRevision?: string; workSeq?: number } })
+  | (BaseEvent & { kind: 'progress'; message: StoredText; progressId?: string; origin?: number; finishControl?: { state: 'released' | 'notified'; conversationId: string } })
   /**
    * Visible ChatGPT-native tool activity that never passed through this MCP server.
    *
@@ -634,11 +632,7 @@ export interface SessionSummary {
     startedAt: number;
     notified: boolean;
     released: boolean;
-    decisionRevision: string | null;
     workSeq: number;
-    decisionSeq: number;
-    decisionInputRevision: string | null;
-    decisionAt?: number;
   } | null;
   /** Agents seen in this session, prime first. Empty when no swarm ran. */
   agents: string[];

@@ -302,7 +302,7 @@ it.each([false, true])('accepts a textless native final only with exact provider
     { kind: 'user_message', time: 10, messageId: 'image-question', text: 'Generate two images' },
     { kind: 'turn_start', time: 11, turnId: 'image-turn' },
     { kind: 'assistant_message', time: 20, messageId: 'image-final', turnId: 'image-turn', text: '',
-      ...(native ? { providerMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' } : {}), state: 'final', final: true, goalEligible: true },
+      ...(native ? { providerMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' } : {}), state: 'final', final: true },
     { kind: 'turn_end', time: 21, turnId: 'image-turn', outcome: 'completed' }
   ]);
   expect(!!await readCompletedFinal(result.sessionId!, conversationId)).toBe(native);

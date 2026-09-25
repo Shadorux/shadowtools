@@ -128,7 +128,7 @@ export const CHAT_BROWSERS = ['chrome', 'edge', 'brave'] as const;
 export type ChatBrowser = (typeof CHAT_BROWSERS)[number];
 
 export interface UiPrefs {
-  /** Recover an unfinished silent executor turn only while Goal and Loop are both off. */
+  /** Recover an unfinished silent executor turn when automatic continuation is enabled. */
   autoContinue?: boolean;
   /** Maintenance may reuse existing tabs but cannot open helpers or missing chats. */
   browserOnly?: boolean;
@@ -138,9 +138,11 @@ export interface UiPrefs {
   /** Actual app-owned tabs to retain; active work and drafts stay protected. Omitted uses workers + 2. */
   tabsToKeepOpen?: number;
   finishTool?: boolean;
-  planBackend?: 'chatgpt' | 'api';
-  finishAction?: 'notify' | 'goal';
   finishLeadMinutes?: number;
+  /** Model used by the explicit Create plan action. */
+  planModel?: string;
+  /** Thinking effort used by the explicit Create plan action. */
+  planReasoning?: ReasoningEffort | '';
   developerMode?: boolean;
   minimizeToTray: boolean;
   autoConnect: boolean;
@@ -154,14 +156,10 @@ export interface UiPrefs {
   appearance?: import('./appearance.js').AppearanceSettings;
 }
 
-/**
- * Session recording is a product invariant. Legacy/wire fields remain so old configs and
- * clients parse, but the main config boundary always publishes `record: true` and
- * `retainDays: 0` (no age expiry). Large image bytes retain their separate bounded quota.
- */
+/** Local session-history settings. Recording is opt-in and age retention is user-controlled. */
 export interface SessionSettings {
   record: boolean;
-  /** Compatibility projection. Canonical value is 0: recordings do not expire by age. */
+  /** 0 means keep recordings until the user deletes them. */
   retainDays: number;
   /** Estimated tokens at which the app starts suggesting a compaction. */
   advisoryTokens: number;
@@ -188,106 +186,6 @@ export interface CompactionSettings {
   autoTokens: number;
 }
 
-/**
- * The reasoning budget asked of the goal model, in OpenRouter's own vocabulary.
- *
- * `default` omits effort selection; reasoning text is still excluded from driver output.
- * OpenRouter's model catalogue determines which explicit efforts the UI offers.
- */
-export const GOAL_REASONING_LEVELS = ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
-export type GoalReasoning = (typeof GOAL_REASONING_LEVELS)[number];
-
-/**
- * The goal loop: a second model, standing in for the user, that keeps a chat going.
- *
- * When ChatGPT finishes a turn, the recorded conversation — every user message and every
- * final ChatGPT answer, and nothing else — is sent to the configured provider's model with an editable
- * continuation-gate instruction. A completion claim produces `NO_REPLY`; only a concrete
- * requested item the final answer explicitly leaves unfinished becomes a user message.
- *
- * Off by default, and useless without a key for the configured provider: the key is the credential the
- * whole feature runs on, so the UI says so rather than failing quietly at the first turn. A custom
- * keyless local endpoint is the one exception — there is nothing to store for it.
- */
-/**
- * Which of the two standing modes the switch runs.
- *
- * One field rather than two booleans, because Goal and Loop are mutually exclusive by
- * construction here: there is nothing to keep in step and no state where both are on. `enabled`
- * stays the master switch it has always been, so everything that only wants to know whether a
- * second model may type into a chat keeps reading exactly that.
- */
-export const GOAL_MODES = ['goal', 'loop'] as const;
-export type GoalMode = (typeof GOAL_MODES)[number];
-
-export type GoalBackend = 'api' | 'chatgpt' | 'templates';
-/**
- * Where the Goal/Loop second model runs when the backend is `api`.
- *
- * `openrouter` is the shipped default: OpenRouter's catalogue, key and routing. `custom`
- * points at any OpenAI-compatible `/chat/completions` endpoint the user runs themselves
- * (Ollama, vLLM, LM Studio, a gateway) and is used with that endpoint's own model id.
- * The other backends (`chatgpt`, `templates`) never read this block.
- */
-export const GOAL_PROVIDERS = ['openrouter', 'custom'] as const;
-export type GoalProviderKind = (typeof GOAL_PROVIDERS)[number];
-
-export interface GoalProviderSettings {
-  kind: GoalProviderKind;
-  /**
-   * Base URL of a custom provider, e.g. `http://localhost:11434/v1`. Ignored unless
-   * kind is `custom`. Stored verbatim; validated when a draft is started, not when saved,
-   * so a typo fails loudly at use time rather than silently rewriting the user's text.
-   */
-  baseUrl: string;
-}
-
-export interface GoalSettings {
-  /** Optional active-turn Goal impulses; zero disables them. */
-  impulseMinutes?: number;
-  /** Include tool details in handoff briefs only; Goal/Loop always use authored conversation text. */
-  includeToolCalls?: boolean;
-  helperModel?: string;
-  helperReasoning?: ReasoningEffort;
-  backend?: GoalBackend;
-  loopBackend?: 'api' | 'chatgpt';
-  enabled: boolean;
-  /**
-   * `goal` stops when the job is done; `loop` never stops on its own.
-   *
-   * Only consulted while `enabled` is true. A chat driven solely by its own saved objective
-   * with the switch off runs as `goal`, because Loop is a thing the user switches on.
-   */
-  mode: GoalMode;
-  provider: GoalProviderSettings;
-  /** A model id: an OpenRouter id while the provider is openrouter, the endpoint's own id while custom. */
-  model: string;
-  reasoning: GoalReasoning;
-  /** Editable continuation-gate instruction sent as the OpenRouter system message. */
-  prompt: string;
-  /**
-   * Editable driver instruction used instead of `prompt` once a chat carries its own goal.
-   *
-   * Two prompts rather than one switch, because the two jobs disagree about where the finish
-   * line comes from: the gate infers it from the conversation, the driver is handed it. Both
-   * are editable for the same reason the gate always was — the shipped wording is a starting
-   * point, and the person whose chat gets typed into is the one who should own it.
-   */
-  objectivePrompt: string;
-  /**
-   * Editable loop instruction, used instead of both of the above while the mode is `loop`.
-   *
-   * A third prompt rather than a flag on the other two, because the job is a different one:
-   * the gate and the driver decide whether to speak, and this one only ever decides what to
-   * say. It is combined with a chat's own goal when it has one, exactly as the driver is.
-   */
-  loopPrompt: string;
-}
-
-/**
- * Experimental multi-agent mode. Disabled by default and deliberately hard to turn on
- * by accident: several ChatGPT tabs driving the same filesystem is a real risk.
- */
 export interface MultiAgentSettings {
   defaultModel?: string;
   defaultReasoning?: ReasoningEffort | '';
@@ -296,11 +194,7 @@ export interface MultiAgentSettings {
   maxWorkers: number;
   /** Permit self-contained calls when browser evidence cannot identify their conversation. */
   allowUnattributedCalls: boolean;
-  /**
-   * Reopen/reload chats that are not Goal/Loop driven — workers, primes, plain chats that have
-   * called tools — once when their tab disappears or goes silent. Goal/Loop chats are always
-   * recovered, whatever this says.
-   */
+  /** Reopen/reload agent chats once when their tab disappears or goes silent. */
   recoverAgentTabs: boolean;
 }
 
@@ -321,7 +215,6 @@ export interface Config {
   sessions: SessionSettings;
   compaction: CompactionSettings;
   multiAgent: MultiAgentSettings;
-  goal: GoalSettings;
   mcp: McpSettings;
 }
 
@@ -621,13 +514,7 @@ export interface MacOSDesktopAccessStatus {
   error: string | null;
 }
 
-/**
- * Whether the enabled product surface currently needs the companion browser extension.
- *
- * Recording is always on and consumes browser observations, so the extension bridge is an
- * unconditional product dependency. Keep the parameter for source compatibility with callers
- * that already pass their config snapshot.
- */
+/** Whether the enabled product surface currently needs the companion browser extension. */
 export function browserExtensionRequired(_config: Pick<Config, 'sessions' | 'multiAgent'> & Partial<Pick<Config, 'capabilities'>>): boolean {
   return true;
 }
@@ -641,10 +528,6 @@ export interface AppState {
   secureStorage: SecureStorageInfo;
   /** True when an OpenAI control-plane API key is stored. The key itself never leaves the main process. */
   hasApiKey: boolean;
-  /** True when an OpenRouter key is stored, which is what the goal loop spends on that provider. Same rule: the key stays here. */
-  hasGoalKey: boolean;
-  /** True when a custom-provider key is stored. Only meaningful beside a custom endpoint, which may also run keyless. */
-  hasCustomProviderKey: boolean;
   /** Resolved path of the tunnel binary we would run, or null if we cannot find one. */
   resolvedBinary: string | null;
   /** Version of the tunnel-client copy shipped inside the app, for diagnostics. */
