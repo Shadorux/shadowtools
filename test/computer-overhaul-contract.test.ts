@@ -34,6 +34,8 @@ describe('desktop helper overhaul contract', () => {
     expect(HELPER_SCRIPT).toContain('Math.Min(95, Math.Max(35');
     expect(HELPER_SCRIPT).toContain('public static void MoveVisible(int x, int y)');
     expect(HELPER_SCRIPT).toContain("'click'        { [Clf]::ClickVisible");
+    expect(HELPER_SCRIPT).toContain('IntPtr handle = created.Handle');
+    expect(HELPER_SCRIPT).toContain('Application.Run();');
     expect(HELPER_SCRIPT).not.toContain('SetSystemCursor');
     expect(HELPER_SCRIPT).not.toContain('SystemParametersInfo');
   });

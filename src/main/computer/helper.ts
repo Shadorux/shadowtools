@@ -621,7 +621,7 @@ public static class CursorGlow {
       // bright magenta/pink before Windows applies the color-key transparency.
       BackColor = Color.FromArgb(1, 1, 1);
       TransparencyKey = Color.FromArgb(1, 1, 1);
-      Width = Height = 58;
+      Width = Height = 72;
       timer.Interval = 30;
       timer.Tick += delegate {
         if (DateTime.UtcNow >= hideAt) { Hide(); timer.Stop(); return; }
@@ -641,8 +641,8 @@ public static class CursorGlow {
     public void Place(int x, int y, bool pulse) {
       Left = x - Width / 2;
       Top = y - Height / 2;
-      hideAt = DateTime.UtcNow.AddMilliseconds(pulse ? 520 : 360);
-      if (pulse) pulseUntil = DateTime.UtcNow.AddMilliseconds(180);
+      hideAt = DateTime.UtcNow.AddMilliseconds(pulse ? 800 : 520);
+      if (pulse) pulseUntil = DateTime.UtcNow.AddMilliseconds(260);
       if (!Visible) Show();
       timer.Start();
       Invalidate();
@@ -653,11 +653,11 @@ public static class CursorGlow {
       e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
       bool pulse = DateTime.UtcNow < pulseUntil;
       float center = Width / 2f;
-      float[] sizes = pulse ? new float[] { 44f, 34f, 24f } : new float[] { 36f, 27f, 19f };
+      float[] sizes = pulse ? new float[] { 58f, 44f, 30f } : new float[] { 48f, 36f, 24f };
       Color[] colors = new Color[] {
-        Color.FromArgb(70, 255, 24, 24),
-        Color.FromArgb(130, 255, 20, 20),
-        Color.FromArgb(225, 255, 42, 42)
+        Color.FromArgb(120, 255, 18, 18),
+        Color.FromArgb(200, 255, 16, 16),
+        Color.FromArgb(255, 255, 48, 48)
       };
       for (int i = 0; i < sizes.Length; i++) {
         float s = sizes[i];
@@ -678,9 +678,16 @@ public static class CursorGlow {
       Thread thread = new Thread(delegate() {
         try {
           GlowForm created = new GlowForm();
+          // Force the native HWND to be created on this STA thread before publishing the
+          // form. Without a handle, InvokeRequired can return false to a caller on the
+          // helper request thread, causing the first Show/Move to happen on the wrong
+          // thread and leaving the visual cursor silently invisible.
+          IntPtr handle = created.Handle;
           lock (Gate) form = created;
           ready.Set();
-          Application.Run(created);
+          // The form stays hidden until Place() runs; the helper process owns this
+          // background message loop for its lifetime.
+          Application.Run();
         } catch { ready.Set(); }
       });
       thread.IsBackground = true;
