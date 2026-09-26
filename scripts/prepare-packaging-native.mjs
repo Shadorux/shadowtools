@@ -11,7 +11,7 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, copyFile, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { nativePrebuildDir, parseTarget, sharpPackagesFor, tarExecutableForPlatform } from './packaging-targets.mjs';
@@ -46,7 +46,11 @@ async function fileTree(dir, relative = '', files = new Map()) {
       await fileTree(absolute, childRelative, files);
       continue;
     }
-    if (!entry.isFile()) throw new Error(`Unexpected non-file in native package: ${childRelative}`);
+    // OneDrive can expose an ordinary hydrated file as a Windows reparse-point Dirent.
+    // Follow only that ambiguous leaf and still reject directories/other special nodes.
+    if (!entry.isFile() && !(await stat(absolute)).isFile()) {
+      throw new Error(`Unexpected non-file in native package: ${childRelative}`);
+    }
     const bytes = await readFile(absolute);
     files.set(childRelative, {
       absolute,
