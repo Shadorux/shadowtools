@@ -41,7 +41,7 @@ for (const [relative, entry] of Object.entries(lock.packages).sort(([a], [b]) =>
   async function walk(folder, depth = 0) {
     for (const item of await fs.readdir(folder, { withFileTypes: true })) {
       if (item.isDirectory() && !['node_modules', '.git'].includes(item.name) && depth < 4) await walk(path.join(folder, item.name), depth + 1);
-      else if (item.isFile() && /^(licen[sc]e|notice|copying|copyright)([._-].*)?$/i.test(item.name)) files.push(path.join(folder, item.name));
+      else if ((item.isFile() || item.isSymbolicLink()) && /^(licen[sc]e|notice|copying|copyright)([._-].*)?$/i.test(item.name)) files.push(path.join(folder, item.name));
     }
   }
   await walk(directory);

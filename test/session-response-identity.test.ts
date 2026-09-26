@@ -11,7 +11,8 @@ let dir: string;
 beforeEach(async () => {
   dir = await makeTempDir('clf-response-identity-');
   initConfigPath(dir); initSessionStore(dir); resetRecorderForTests();
-  await saveConfig(defaultConfig());
+  const config = defaultConfig();
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true } });
 });
 afterEach(async () => {
   await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests(); vi.restoreAllMocks();

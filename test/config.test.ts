@@ -221,10 +221,10 @@ describe('settings migration', () => {
    * is edge-based rather than "currently above the line", so the advisory line is safe as
    * the default and still leaves room to finish the crossing turn and write the handoff.
    */
-  it('starts with automatic compaction on at the advisory line', async () => {
+  it('starts with automatic compaction off at the advisory line', async () => {
     await saveConfig(defaultConfig());
     const loaded = await loadConfig();
-    expect(loaded.compaction.auto).toBe(true);
+    expect(loaded.compaction.auto).toBe(false);
     expect(loaded.compaction.autoTokens).toBe(loaded.sessions.advisoryTokens);
     expect(loaded.compaction.autoTokens).toBe(400_000);
   });
@@ -251,7 +251,7 @@ describe('settings migration', () => {
     const config = defaultConfig();
     await saveConfig({ ...config, compaction: { ...config.compaction, auto: false, autoTokens: 300_000 } });
     const loaded = await loadConfig();
-    expect(loaded.compaction.auto).toBe(true);
+    expect(loaded.compaction.auto).toBe(false);
     expect(loaded.compaction.autoTokens).toBe(400_000);
   });
 
@@ -336,7 +336,7 @@ describe('settings migration', () => {
     delete older.compaction.autoTokens;
     await saveConfig(older as ReturnType<typeof defaultConfig>);
     const loaded = await loadConfig();
-    expect(loaded.compaction.auto).toBe(true);
+    expect(loaded.compaction.auto).toBe(false);
     expect(loaded.compaction.autoTokens).toBe(400_000);
   });
 

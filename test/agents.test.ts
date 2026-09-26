@@ -109,6 +109,7 @@ async function setEnabled(enabled: boolean, maxWorkers = 3, allowUnattributedCal
   const base = defaultConfig();
   await saveConfig({
     ...base,
+    sessions: { ...base.sessions, record: true },
     multiAgent: { ...base.multiAgent, enabled, maxWorkers, allowUnattributedCalls }
   });
 }

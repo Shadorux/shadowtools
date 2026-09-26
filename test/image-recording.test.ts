@@ -21,7 +21,7 @@ beforeEach(async () => {
   store.initSessionStore(root);
   resetRecorderForTests();
   const config = defaultConfig();
-  await saveConfig(config);
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true } });
   await fs.writeFile(path.join(root, 'pixel.png'), png);
   const conversationId = randomUUID();
   sessionId = (await sessionForConversation(conversationId))!;

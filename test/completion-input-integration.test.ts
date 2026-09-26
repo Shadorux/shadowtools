@@ -40,7 +40,8 @@ async function post(route: string, body: unknown) {
 beforeAll(async () => {
   directory = await makeTempDir('clf-completion-integration-');
   initConfigPath(directory); initSecretsPath(directory); initDurableStore(directory); initSessionStore(directory);
-  await saveConfig(defaultConfig());
+  const config = defaultConfig();
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true } });
   registerIpc(() => ({ isDestroyed: () => false, webContents: { send: pushed } }) as never, () => undefined);
   await startBridge();
   const paired = await post('/pair', {});
@@ -51,7 +52,8 @@ beforeEach(async () => {
   await writeDurableNow('session-input', []);
   await writeDurableNow('plugin-refresh', []);
   input.resetInputForTests(); pushed.mockClear();
-  await saveConfig(defaultConfig());
+  const config = defaultConfig();
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true } });
 });
 afterAll(async () => {
   await stopBridge(); await flushDurable(); resetSessionStoreForTests(); resetDurableForTests();

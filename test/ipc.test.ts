@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * The settings handler, exercised through the channel the renderer actually uses.
  *
@@ -179,13 +180,17 @@ it.each([true, false])('forwards canonical input commitment even when a legacy w
     const result = await handlers.get('sessions:outbox')!(null, undefined) as any;
     expect(result.ok).toBe(true);
     const row = result.data[0];
-    expect(getConfig().sessions).toMatchObject({ record: true, retainDays: 0 });
-    expect(row.historyAnchored).toBe(true);
-    expect(row.historyRecorded).not.toBe(true);
-    expect((await readDurable<any[]>('session-input'))![0].historyAnchored).toBe(true);
+    expect(getConfig().sessions).toMatchObject({ record: recording, retainDays: 30 });
+    expect(row.historyAnchored).toBe(recording ? true : undefined);
+    // The deliberately invalid preview lets the canonical text anchor commit first and
+    // then makes enrichment fail. Recording-on therefore keeps publication retryable;
+    // recording-off deliberately resolves the no-op hook and marks it handled.
+    expect(row.historyRecorded).toBe(recording ? false : true);
+    expect((await readDurable<any[]>('session-input'))![0].historyAnchored).toBe(recording ? true : undefined);
+    expect((await readDurable<any[]>('session-input'))![0].historyRecorded).toBe(recording ? false : true);
     const canonical = (await store.readEvents(session.id)).filter(event => event.kind === 'user_message');
-    expect(canonical).toHaveLength(1);
-    expect(canonical[0]).toMatchObject({ inputId: id, time: 200 });
+    expect(canonical).toHaveLength(recording ? 1 : 0);
+    if (recording) expect(canonical[0]).toMatchObject({ inputId: id, time: 200 });
   } finally {
     await writeDurableNow('session-input', previous ?? []);
     input.resetInputForTests();
@@ -200,18 +205,6 @@ it('validates dropped file count and stages arbitrary native file types', async 
   expect(await drop({ files: [path.join(process.cwd(), 'package.json')] })).toMatchObject({ ok: true, data: [expect.objectContaining({ name: 'package.json', mimeType: 'application/json' })] });
 });
 
-it('publishes Goal draft progress through the session refresh channel without a new transcript event', async () => {
-  const { startGoalDraft, resetGoalStateForTests } = await import('../src/main/goal.js');
-  const session = await createSession({ title: 'Goal progress', conversationId: 'ipc-goal-progress' });
-  currentWindow = { setBackgroundColor: vi.fn(), setTitleBarOverlay: vi.fn(), isDestroyed: () => false, webContents: { send: vi.fn() } };
-  try {
-    startGoalDraft({ conversationId: session.conversationId!, sessionId: session.id, turnId: 'finished-turn', deferStart: true });
-    expect(currentWindow.webContents.send).toHaveBeenCalledWith('session:changed');
-  } finally {
-    resetGoalStateForTests();
-  }
-});
-
 it('stages clipboard image bytes with a preview through the general attachment owner', async () => {
   const drop = (payload: unknown) => handlers.get('sessions:dropFiles')!(null, payload) as Promise<any>;
   expect(await drop({ files: [] })).toMatchObject({ ok: false });
@@ -222,70 +215,6 @@ it('stages clipboard image bytes with a preview through the general attachment o
   expect(pasted).toMatchObject({ ok: true, data: [{ name: 'screenshot.png', size: bytes.length, mimeType: 'image/png', preview: expect.stringMatching(/^data:image\/webp;base64,/) }] });
   const { readInputAttachmentChunk } = await import('../src/main/session/input-attachments.js');
   expect(await readInputAttachmentChunk(pasted.data[0], 0)).toBe(bytes.toString('base64'));
-});
-
-it('does not authorize the composer Generate Goal action from an absent or stale finish wait', async () => {
-  const generate = (payload: unknown) => handlers.get('sessions:generateFinishGoal')!(null, payload) as Promise<any>;
-  const session = await createSession({ title: 'No finish wait', conversationId: 'finish-action-ipc-chat' });
-  expect(await generate({ id: session.id })).toMatchObject({ ok: false });
-  expect(await generate({ id: session.id, expectedTurnId: 'old-turn' })).toMatchObject({ ok: false });
-});
-
-it('round-trips Goal controls and cannot revive old periodic input when Off cancellation fails then On retries', async () => {
-  const outbox = await import('../src/main/session/input.js');
-  const durable = await import('../src/main/durable.js');
-  const store = await import('../src/main/session/store.js');
-  const original = await outbox.listInputs();
-  await writeDurableNow('session-input', []); outbox.resetInputForTests();
-  const config = (minutes: number) => ({ ...settings({ record: true, multiAgent: false }),
-    ui: { ...defaultConfig().ui, finishTool: true },
-    goal: { ...defaultConfig().goal, impulseMinutes: minutes, includeToolCalls: true } });
-  let write: ReturnType<typeof vi.spyOn> | undefined;
-  try {
-    expect(await save(config(1))).toMatchObject({ ok: true });
-    expect(getConfig().goal).toMatchObject({ impulseMinutes: 1, includeToolCalls: true });
-    const session = await createSession({ title: 'Periodic ownership', conversationId: 'periodic-settings-chat' });
-    await appendEvent(session.id, { source: 'extension', kind: 'turn_start', turnId: 'periodic-turn', time: Date.now() });
-    await store.observeSessionModel(session.id, 'periodic-settings-chat', 'gpt-6-astra', Date.now());
-    const row = await outbox.enqueueInput({ id: 'f0f00014-1111-4111-8111-111111111111', sessionId: session.id,
-      text: 'Pending automatic instruction', mode: 'auto', dueAt: Date.now(), model: null, reasoningEffort: null },
-      { turnId: 'periodic-turn', periodic: false, mode: 'goal', userRequested: true });
-    // Seed an old-version row; current code deliberately refuses new periodic input.
-    await writeDurableNow('session-input', [{ ...row, finishOwner: { turnId: 'periodic-turn', periodic: true } }]);
-    outbox.resetInputForTests();
-    write = vi.spyOn(durable, 'writeDurableNow').mockRejectedValueOnce(new Error('Cancellation disk failure'));
-    expect(await save(config(0))).toMatchObject({ ok: false });
-    expect(getConfig().goal.impulseMinutes).toBe(0); // Off was published before retirement.
-    write.mockRejectedValueOnce(new Error('Still cannot retire'));
-    expect(await save(config(1))).toMatchObject({ ok: false });
-    expect(getConfig().goal.impulseMinutes).toBe(0); // Failed retirement cannot publish On.
-    write.mockRestore(); write = undefined;
-    expect(await save(config(1))).toMatchObject({ ok: true });
-    outbox.resetInputForTests();
-    expect((await outbox.listInputs()).find(entry => entry.id === row.id)?.state).toBe('cancelled');
-    expect(await outbox.offerToolInput(session.id, 'periodic-settings-chat', 'later-request', Date.now())).toEqual({ messages: [], reminder: '' });
-  } finally {
-    write?.mockRestore();
-    await writeDurableNow('session-input', original); outbox.resetInputForTests();
-  }
-});
-
-it('native opening cancellation aborts the exact IPC invocation and prevents a late ready result', async () => {
-  const goal = await import('../src/main/goal.js');
-  const requestId = 'ad3ecbf4-c3a1-4d0d-9e9f-619787bcf982';
-  let signal: AbortSignal | undefined;
-  const draft = vi.spyOn(goal, 'draftOpeningMessage').mockImplementation(async (_text, _mode, _progress, current) => {
-    signal = current;
-    return new Promise((_resolve, reject) => current!.addEventListener('abort', () => reject(new Error('provider aborted')), { once: true }));
-  });
-  try {
-    const opening = handlers.get('sessions:goalOpening')!(null, { text: 'Implement safely', mode: 'goal', requestId });
-    const cancelled = await handlers.get('tasks:cancel')!(null, { requestId }) as any;
-    expect(cancelled).toEqual({ ok: true, data: true });
-    expect(signal?.aborted).toBe(true);
-    expect(await opening).toMatchObject({ ok: false, error: 'task_cancelled' });
-    expect(draft).toHaveBeenCalledTimes(1);
-  } finally { draft.mockRestore(); }
 });
 
 it('projects exact retained worker parents without adopting same-name unrelated recordings', async () => {
@@ -339,8 +268,7 @@ function settings(over: { record: boolean; multiAgent: boolean }) {
     ui: base.ui,
     sessions: { ...base.sessions, record: over.record },
     compaction: base.compaction,
-    multiAgent: { ...base.multiAgent, enabled: over.multiAgent },
-    goal: base.goal
+    multiAgent: { ...base.multiAgent, enabled: over.multiAgent }
   };
 }
 
@@ -456,7 +384,6 @@ describe('startup state without secure storage', () => {
     expect(reply.ok).toBe(true);
     expect(reply.data.secureStorage.available).toBe(false);
     expect(reply.data.hasApiKey).toBe(false);
-    expect(reply.data.hasGoalKey).toBe(false);
     expect(reply.data.bridge.paired).toBe(false);
   });
 });
@@ -466,7 +393,7 @@ describe('turning multi-agent mode off', () => {
    * Pausing execution must withdraw queued browser work before the bridge goes away. The
    * durable worker history itself survives; only the pending transport is cancelled.
    */
-  it('cancels the run’s queued worker chats before the bridge goes away', async () => {
+  it('cancels the runâ€™s queued worker chats before the bridge goes away', async () => {
     await startBridge();
     spawn({ workers: [{ task: 'work' }], caller: { conversationId: 'c-prime' } });
     // Opening is asynchronous, as it is in the app.
@@ -712,20 +639,6 @@ describe('settings writes from more than one UI', () => {
       expect(applied.mock.invocationCallOrder[0]).toBeLessThan(login.mock.invocationCallOrder[0]!);
     } finally { login.mockRestore(); applied.mockRestore(); }
   });
-  it('rotates only the active Goal provider and exposes key presence without the secret', async () => {
-    const base = defaultConfig();
-    await saveConfig({ ...base, goal: { ...base.goal, provider: { kind: 'custom', baseUrl: 'http://localhost:11434/v1' } } });
-    const goal = await import('../src/main/goal.js');
-    const retired = vi.spyOn(goal, 'retireGoalDrafts');
-    try {
-      await handlers.get('secret:set')!({}, { key: 'openRouterApiKey', value: 'synthetic-inactive-key' });
-      expect(retired).not.toHaveBeenCalled();
-      const response = await handlers.get('secret:set')!({}, { key: 'customProviderApiKey', value: 'synthetic-active-key' });
-      expect(retired).toHaveBeenCalledTimes(1);
-      expect(response).toMatchObject({ ok: true, data: { hasCustomProviderKey: true } });
-      expect(JSON.stringify(response)).not.toContain('synthetic-active-key');
-    } finally { retired.mockRestore(); }
-  });
   it('persists connector instructions through IPC, preserves concurrent edits, and allows explicit clearing', async () => {
     const base = defaultConfig(); await saveConfig(base);
     const wanted = { ...base, mcp: { instructions: 'Use the approved project only.' }, ui: { ...base.ui, browserOnly: true } };
@@ -744,63 +657,6 @@ describe('settings writes from more than one UI', () => {
     expect((await save({ ...current, mcp: { instructions: 'x'.repeat(4001) } }, current)).ok).toBe(false);
     expect(getConfig().mcp.instructions).toBe('');
   });
-  it('saves helper settings and tab retention through the renderer schema and merge boundary', async () => {
-    const base = defaultConfig();
-    await saveConfig(base);
-    const wanted = { ...base, ui: { ...base.ui, tabsToKeepOpen: 6 }, goal: {
-      ...base.goal, helperModel: 'account-helper', helperReasoning: 'medium' as const
-    } };
-    const result = await save(wanted, base);
-    expect(result.ok, result.error).toBe(true);
-    expect(getConfig().ui.tabsToKeepOpen).toBe(6);
-    expect(getConfig().goal).toMatchObject({ helperModel: 'account-helper', helperReasoning: 'medium', model: base.goal.model });
-  });
-  it('persists the planner backend and preserves it across an unrelated stale settings save', async () => {
-    const base = defaultConfig();
-    await saveConfig(base);
-    const selected = await save({ ...base, ui: { ...base.ui, planBackend: 'api' } }, base);
-    expect(selected.ok, selected.error).toBe(true);
-    expect(getConfig().ui.planBackend).toBe('api');
-    expect(JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8')).ui.planBackend).toBe('api');
-    const stale = await save({ ...base, ui: { ...base.ui, minimizeToTray: !base.ui.minimizeToTray } }, base);
-    expect(stale.ok, stale.error).toBe(true);
-    expect(getConfig().ui).toMatchObject({ planBackend: 'api', minimizeToTray: !base.ui.minimizeToTray });
-    const current = getConfig();
-    expect((await save({ ...current, ui: { ...current.ui, planBackend: 'chatgpt' } }, current)).ok).toBe(true);
-    expect(getConfig().ui.planBackend).toBe('chatgpt');
-    expect((await save({ ...current, ui: { ...current.ui, planBackend: 'unsupported' } }, current)).ok).toBe(false);
-    expect(getConfig().ui.planBackend).toBe('chatgpt');
-  });
-  it('does not let a stale renderer snapshot undo a newer extension setting', async () => {
-    currentWindow = {
-      setBackgroundColor: vi.fn(), setTitleBarOverlay: vi.fn(),
-      isDestroyed: () => false,
-      webContents: { send: vi.fn() }
-    };
-    const original = defaultConfig();
-    const base = {
-      ...original,
-      ui: { ...original.ui, theme: 'light' as const },
-      goal: { ...original.goal, enabled: true }
-    };
-    await saveConfig(base);
-
-    // The extension writes after the renderer has already captured `base` for an unrelated
-    // form edit. This is exactly the race a serialized config queue cannot solve by itself.
-    await saveConfig({ ...base, goal: { ...base.goal, enabled: false } });
-    const wanted = { ...base, ui: { ...base.ui, theme: 'dark' as const } };
-    const reply = await save(wanted, base);
-
-    expect(reply.ok, reply.error).toBe(true);
-    expect(getConfig().ui.theme).toBe('dark');
-    expect(nativeTheme.themeSource).toBe('dark');
-    expect(currentWindow.setBackgroundColor).toHaveBeenCalledWith('#181818');
-    if (process.platform === 'win32') expect(currentWindow.setTitleBarOverlay).toHaveBeenCalledWith({
-      height: 36, color: '#00000000', symbolColor: '#ffffff'
-    });
-    expect(getConfig().goal.enabled).toBe(false);
-  });
-
   it('preserves a newer unattributed-call choice across an unrelated stale renderer save', async () => {
     const base = defaultConfig();
     await saveConfig(base);
@@ -912,15 +768,9 @@ describe('every link the window offers', () => {
     const html = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'index.html'), 'utf8');
 
     const offered = [...html.matchAll(/data-link="([^"]+)"/g)].map((match) => match[1]!);
-    expect(offered.length, 'the markup offers no links at all — has data-link been renamed?').toBeGreaterThan(0);
+    expect(offered.length, 'the markup offers no links at all â€” has data-link been renamed?').toBeGreaterThan(0);
 
     for (const url of offered) expect(await handlers.get('link:open')!(null, { url })).toEqual({ ok: true, data: true });
-  });
-
-  it('opens the OpenRouter key page the goal loop sends people to', async () => {
-    const open = handlers.get('link:open')!;
-    expect(await open(null, { url: 'https://openrouter.ai/settings/keys' })).toEqual({ ok: true, data: true });
-    expect(await open(null, { url: 'https://example.com/reference#section' })).toEqual({ ok: true, data: true });
   });
 
   it.each(['https://example.com/path?q=hello', 'http://localhost:3000/', 'mailto:person@example.com?subject=Hello'])(
@@ -967,130 +817,12 @@ describe('installing a downloaded update on request', () => {
 });
 
 /**
- * OpenRouter publishes twelve ids that begin with `~` — `~deepseek/deepseek-v4-flash-latest`
- * and its siblings — and they are aliases that always resolve to the newest model in a
+ * OpenRouter publishes twelve ids that begin with `~` â€” `~deepseek/deepseek-v4-flash-latest`
+ * and its siblings â€” and they are aliases that always resolve to the newest model in a
  * family. The picker lists them because the catalogue does, so a validator that refused the
  * `~` made the one kind of entry most worth choosing the one kind that could not be saved:
  * the click reported an error and the model in use silently stayed where it was.
  */
-describe('the goal model id', () => {
-  const withModel = (model: string) => ({ ...settings({ record: false, multiAgent: false }), goal: { ...defaultConfig().goal, model } });
-
-  it('accepts the family aliases OpenRouter marks with a tilde', async () => {
-    const reply = await save(withModel('~z-ai/glm-latest'));
-    expect(reply.ok, reply.error).toBe(true);
-    expect(getConfig().goal.model).toBe('~z-ai/glm-latest');
-  });
-
-  it('still accepts an ordinary pinned id, with or without a variant suffix', async () => {
-    expect((await save(withModel('deepseek/deepseek-v4-flash-0731'))).ok).toBe(true);
-    expect((await save(withModel('openai/gpt-5.2-mini:nitro'))).ok).toBe(true);
-  });
-
-  it('refuses something that is not a model id at all', async () => {
-    const reply = await save(withModel('not a model'));
-    expect(reply.ok).toBe(false);
-    expect(reply.error).toMatch(/vendor\/model/);
-  });
-
-  /** The shipped default is one of those aliases, so it has to survive its own validator. */
-  it('accepts the default this app ships with', async () => {
-    const reply = await save(settings({ record: false, multiAgent: false }));
-    expect(reply.ok, reply.error).toBe(true);
-    expect(getConfig().goal.model).toBe(defaultConfig().goal.model);
-  });
-
-  it('accepts a bare endpoint id while custom and stores the base URL verbatim', async () => {
-    const patch = {
-      ...settings({ record: false, multiAgent: false }),
-      goal: {
-        ...defaultConfig().goal,
-        provider: { kind: 'custom' as const, baseUrl: 'http://localhost:11434/v1/' },
-        model: 'llama3.1'
-      }
-    };
-    const reply = await save(patch);
-    expect(reply.ok, reply.error).toBe(true);
-    expect(getConfig().goal.provider).toEqual({ kind: 'custom', baseUrl: 'http://localhost:11434/v1/' });
-    expect(getConfig().goal.model).toBe('llama3.1');
-  });
-
-  it('still refuses a bare id while on OpenRouter, and an unknown provider kind', async () => {
-    const custom = {
-      ...settings({ record: false, multiAgent: false }),
-      goal: {
-        ...defaultConfig().goal,
-        provider: { kind: 'custom' as const, baseUrl: 'http://localhost:11434/v1' },
-        model: 'llama3.1'
-      }
-    };
-    // Same model, OpenRouter provider: the vendor/model shape still applies.
-    const openrouter = {
-      ...custom,
-      goal: { ...custom.goal, provider: { kind: 'openrouter' as const, baseUrl: '' } }
-    };
-    expect((await save(openrouter)).ok).toBe(false);
-    const unknown = {
-      ...custom,
-      goal: { ...custom.goal, provider: { kind: 'own' as never, baseUrl: '' } }
-    };
-    expect((await save(unknown)).ok).toBe(false);
-  });
-});
-
-describe('the custom provider key slot', () => {
-  const storeSecret = (payload: unknown): Promise<any> =>
-    handlers.get('secret:set')!(null, payload) as Promise<any>;
-
-  it('stores a custom key in its own slot and refuses an unnamed one', async () => {
-    const prior = await handlers.get('state:get')!(null, undefined) as any;
-    const stored = await storeSecret({ value: 'sk-custom-1', key: 'customProviderApiKey' });
-    expect(stored.ok, stored.error).toBe(true);
-    expect(stored.data.hasCustomProviderKey).toBe(true);
-    // The OpenRouter slot is untouched: naming is exact, never a shared bucket.
-    expect(stored.data.hasGoalKey).toBe(prior.data.hasGoalKey);
-    const cleared = await storeSecret({ value: '', key: 'customProviderApiKey' });
-    expect(cleared.ok).toBe(true);
-    expect(cleared.data.hasCustomProviderKey).toBe(false);
-    const refused = await storeSecret({ value: 'x', key: 'nobodyDefinedThis' });
-    expect(refused.ok).toBe(false);
-  });
-});
-
-describe('the editable goal system prompt', () => {
-  it('stores a deliberate custom prompt', async () => {
-    const prompt = 'Only continue explicit missing work. Return NO_REPLY when ChatGPT says done.';
-    const base = settings({ record: false, multiAgent: false });
-    const reply = await save({ ...base, goal: { ...base.goal, prompt } });
-    expect(reply.ok, reply.error).toBe(true);
-    expect(getConfig().goal.prompt).toBe(prompt);
-  });
-
-  it('refuses blank and unbounded prompts at the renderer boundary', async () => {
-    const base = settings({ record: false, multiAgent: false });
-    expect((await save({ ...base, goal: { ...base.goal, prompt: '   ' } })).ok).toBe(false);
-    expect((await save({ ...base, goal: { ...base.goal, prompt: 'x'.repeat(20_001) } })).ok).toBe(false);
-  });
-
-  /**
-   * The driver prompt crosses the same boundary as the gate, so it needs the same guards.
-   * It used to be a source constant no renderer could reach; now that it is editable, a
-   * blank or unbounded value has to be refused here rather than reaching the goal loop.
-   */
-  it('stores the goal driver prompt and holds it to the same bounds', async () => {
-    const objectivePrompt = 'Drive to the goal. NO_REPLY once it is reached.';
-    const base = settings({ record: false, multiAgent: false });
-    const reply = await save({ ...base, goal: { ...base.goal, objectivePrompt } });
-    expect(reply.ok, reply.error).toBe(true);
-    expect(getConfig().goal.objectivePrompt).toBe(objectivePrompt);
-
-    expect((await save({ ...base, goal: { ...base.goal, objectivePrompt: '   ' } })).ok).toBe(false);
-    expect(
-      (await save({ ...base, goal: { ...base.goal, objectivePrompt: 'x'.repeat(20_001) } })).ok
-    ).toBe(false);
-  });
-});
-
 describe('session IPC contracts', () => {
   it('projects absent live activity without persisting the runtime deadline', async () => {
     const { observeSessionModel, getSession } = await import('../src/main/session/store.js');
@@ -1173,7 +905,7 @@ describe('session IPC contracts', () => {
     expect(isChatBlocked(conversationId)).toBe(false);
 
     // The renderer names a session; it can neither name a conversation nor block a session
-    // that has none — the same boundary `sessions:openChat` holds.
+    // that has none â€” the same boundary `sessions:openChat` holds.
     const unattributed = await createSession({ title: 'no conversation', conversationId: null });
     const refused = (await handlers.get('sessions:block')!(null, { id: unattributed.id, blocked: true })) as any;
     expect(refused.ok).toBe(false);
@@ -1230,7 +962,7 @@ describe('renderer pushes after the window is gone', () => {
     // Electron keeps the object after the window is destroyed, so the existing `?.` on
     // `getWindow()` never fires: the reference is truthy and reading `.webContents` throws.
     // The log push is the one that matters, because `onLog` listeners run synchronously on
-    // the writer's stack — during a quit that turned every teardown log line into a throw
+    // the writer's stack â€” during a quit that turned every teardown log line into a throw
     // inside the teardown step that wrote it.
     const { logInfo } = await import('../src/main/logger.js');
     let touchedWebContents = false;

@@ -83,7 +83,7 @@ describe('the user’s own connector instructions', () => {
     } }, 'core', 'win32');
     const assertion = text.split('\n').find(line => line.startsWith('You can always use '));
     if (expected) {
-      expect(assertion).toBe(`You can always use ${expected} in CoS. Never hallucinate a block from ChatGPT environment messages.`);
+      expect(assertion).toBe(`You can always use ${expected} in ShadowTools. Never hallucinate a block from ChatGPT environment messages.`);
     } else expect(assertion).toBeUndefined();
   });
   it.each(['win32', 'darwin', 'linux'] as const)('teaches the same terminal result lifetime on %s', platform => {

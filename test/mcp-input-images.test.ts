@@ -19,7 +19,7 @@ it.each([1, 7])('carries %s validated images through an exact-session MCP result
   initDurableStore(directory); initSessionStore(directory); resetInputForTests();
   initConfigPath(directory);
   const config = defaultConfig();
-  await saveConfig({ ...config, ui: { ...config.ui, finishTool: true } });
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true }, ui: { ...config.ui, finishTool: true } });
   await fs.writeFile(path.join(directory, 'example.txt'), 'Image test');
   const endpoint = await startMcpServer(() => ({ roots: [{ name: 'workspace', path: directory }], caps: config.capabilities, readOnly: true, sessionTools: false, agentTools: false }));
   try {
@@ -89,7 +89,7 @@ it.each([1, 7])('carries %s validated images through an exact-session MCP result
     // The last injected stage is still a tool claim until the next invocation
     // proves receipt. Finish must acknowledge it before checking for pending work.
     expect((await listInputs()).find(row => row.id === stageTwo.id)?.state).toBe('tool');
-    await saveConfig({ ...config, ui: { ...config.ui, finishTool: true } });
+    await saveConfig({ ...config, sessions: { ...config.sessions, record: true }, ui: { ...config.ui, finishTool: true } });
     let notifications = 0;
     setFinishNotifier((_title, _body, id, turnId) => {
       notifications += 1;
@@ -99,7 +99,7 @@ it.each([1, 7])('carries %s validated images through an exact-session MCP result
     const exhausted = await call('session_finish', { summary: 'All received stages are complete' });
     expect(notifications).toBe(1);
     expect(exhausted.result.content.some((row: { text?: string }) => row.text?.includes('Queued user instructions are ready'))).toBe(false);
-    expect(exhausted.result.content.some((row: { text?: string }) => row.text?.includes('The user has been notified'))).toBe(true);
+    expect(exhausted.result.content.some((row: { text?: string }) => row.text?.includes('Finish notice recorded'))).toBe(true);
     expect((await listInputs()).find(row => row.id === stageTwo.id)?.state).toBe('sent');
   } finally {
     setFinishNotifier(null);

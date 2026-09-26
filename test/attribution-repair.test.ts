@@ -30,7 +30,8 @@ const calls = async (id: string) => (await readEvents(id, { kinds: ['tool_call']
 beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'clf-attribution-repair-'));
   initConfigPath(dir); initSessionStore(dir); initDurableStore(dir);
-  await saveConfig(defaultConfig());
+  const config = defaultConfig();
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true } });
 });
 afterEach(async () => {
   vi.restoreAllMocks();

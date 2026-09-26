@@ -3,6 +3,7 @@ import type { ChatModelCatalog } from '../shared/chat-models.js';
 import { chatModelDisplayLabel } from '../shared/chat-models.js';
 import type { Config } from '../shared/types.js';
 import type { ReasoningEffort } from '../shared/session.js';
+import type { AppApi } from '../preload/index.js';
 import { $, el, run } from './dom.js';
 
 let catalog: ChatModelCatalog = { state: 'unknown', requestedAt: null, observedAt: null, models: [] };
@@ -11,6 +12,7 @@ let onComposerPaint: (() => void) | undefined;
 const catalogWaiters = new Set<() => void>();
 let discovery: Promise<void> | null = null;
 let catalogSubscribed = false;
+const api: AppApi = (window as unknown as { api: AppApi }).api;
 type ObservedSelection = { model: string; reasoningEffort?: ReasoningEffort; observedAt: number };
 let composerContext: { scope: string | null; observation: ObservedSelection | null; edited: boolean } | null = null;
 const pairs = [['composerModel', 'composerReasoning'], ['workerModel', 'workerReasoning'], ['planModel', 'planReasoning']] as const;
@@ -229,7 +231,7 @@ function discoverModels(): Promise<void> {
   catalog = { ...catalog, state: 'pending', requestedAt: Date.now(), error: undefined };
   paintStatus();
   const work = (async () => {
-    const result = await run(window.api.requestChatModels()).catch(() => null);
+    const result = await run(api.requestChatModels()).catch(() => null);
     if (requested !== generation) return;
     catalog = result ?? { ...catalog, state: 'unavailable', error: t("Model discovery could not start.") };
     for (const [modelId, effortId] of pairs) paintPair(modelId, effortId);
@@ -259,10 +261,10 @@ export function applyChatModels(config: Config, previous?: Config): void {
     return select && document.activeElement === select && previous && select.value !== (prior ?? '') ? select.value : value;
   };
   paintPair('workerModel', 'workerReasoning', chosen('workerModel', config.multiAgent.defaultModel ?? '', previous?.multiAgent.defaultModel), chosen('workerReasoning', config.multiAgent.defaultReasoning ?? '', previous?.multiAgent.defaultReasoning));
-  paintPair('planModel', 'planReasoning', chosen('planModel', config.ui.planModel ?? 'gpt-5.6-sol', previous?.ui.planModel ?? 'gpt-5.6-sol'), chosen('planReasoning', config.ui.planReasoning ?? 'high', previous?.ui.planReasoning ?? 'high'));
+  paintPair('planModel', 'planReasoning', chosen('planModel', config.ui?.planModel ?? 'gpt-5.6-sol', previous?.ui?.planModel ?? 'gpt-5.6-sol'), chosen('planReasoning', config.ui?.planReasoning ?? 'high', previous?.ui?.planReasoning ?? 'high'));
   if (catalogSubscribed && catalog.state !== 'unknown') return;
   const requested = ++generation;
-  void window.api.getChatModels().then(result => {
+  void api.getChatModels().then(result => {
     if (requested !== generation || !result?.ok || !result.data) return;
     catalog = result.data;
     for (const [modelId, effortId] of pairs) paintPair(modelId, effortId);
@@ -273,9 +275,9 @@ export function applyChatModels(config: Config, previous?: Config): void {
 
 export function initChatModels(onPaint?: () => void): void {
   onComposerPaint = onPaint;
-  if (window.api.onChatModelsChanged) {
+  if (api.onChatModelsChanged) {
     catalogSubscribed = true;
-    window.api.onChatModelsChanged(value => {
+    api.onChatModelsChanged(value => {
       // A current push supersedes every older startup/read/refresh response.
       ++generation; catalog = value;
       for (const [modelId, effortId] of pairs) paintPair(modelId, effortId);

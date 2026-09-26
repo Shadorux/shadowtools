@@ -8,7 +8,6 @@ import { afterEach, expect, it, vi } from 'vitest';
 const domSource = readFileSync(new URL('../extension/chatgpt-dom.js', import.meta.url), 'utf8');
 const fiberSource = readFileSync(new URL('../extension/fiber.js', import.meta.url), 'utf8');
 const contentSource = readFileSync(new URL('../extension/content.js', import.meta.url), 'utf8');
-const usageSource = readFileSync(new URL('../extension/usage.js', import.meta.url), 'utf8');
 const THREAD = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 const USER = '11111111-1111-4111-8111-111111111111';
 const TURN = '22222222-2222-4222-8222-222222222222';
@@ -391,9 +390,9 @@ it.each(['duplicate-cache', 'conflicting-conversation', 'duplicate-id', 'unavail
 });
 it('recognizes the shell recipient spelling without admitting similarly named connectors', async () => {
   const f = fixture(), step = f.entry.turn.items[1].items[1];
-  step.invocation.server = 'Chat_On_Steroids_Core'; step.invocation.tool = 'read';
+  step.invocation.server = 'ShadowTools_Core'; step.invocation.tool = 'read';
   expect((await f.ask()).turns[0].calls).toHaveLength(1);
-  step.invocation.server = 'Chat_On_Steroids_Core_Backup';
+  step.invocation.server = 'ShadowTools_Core_Backup';
   expect((await f.ask()).turns[0].calls).toEqual([]);
 });
 it('retires shell busy evidence when its owner becomes unreadable or another question is mounted', async () => {
@@ -548,27 +547,6 @@ it('opens a local project from a cold shell page and binds its exact first send 
   expect(r.hook.desktopProjectInputForTest()).toBeNull();
   (f.win as any).__CLF_CONTENT_RECORDER__.stop();
 }, 10000);
-it('correlates an early shell stream request through the real observer and recorder without cached messages', async () => {
-  const f = fixture(), win = f.win as any;
-  const r = await recorder(f);
-  const frames = ['event: delta_encoding\ndata: "v1"\n\n',
-    `event: delta\ndata: ${JSON.stringify({ v: { conversation_id: THREAD, message: { metadata: { request_id: OTHER }, content: { parts: ['NEVER_COPY_STREAM_TEXT'] } } } })}\n\n`];
-  let index = 0;
-  win.TextDecoder = TextDecoder;
-  win.fetch = async () => ({ ok: true, url: 'https://chatgpt.com/backend-api/f/conversation',
-    headers: { get: () => 'text/event-stream' }, clone: () => ({ body: { getReader: () => ({
-      read: async () => index < frames.length ? { done: false, value: new TextEncoder().encode(frames[index++]!) } : { done: true },
-      cancel: async () => undefined
-    }) } }) });
-  win.eval(usageSource);
-  await win.fetch('/backend-api/f/conversation', { method: 'POST' });
-  await vi.waitFor(() => expect(r.sent.filter(m => m.type === 'correlate')).toContainEqual(expect.objectContaining({
-    conversationId: THREAD, calls: expect.arrayContaining([expect.objectContaining({ requestId: OTHER })])
-  })));
-  expect(f.queries).toEqual([]);
-  expect(JSON.stringify(r.sent)).not.toContain('NEVER_COPY_STREAM_TEXT');
-  win.__CLF_CONTENT_RECORDER__.stop();
-});
 it('sends a marked shell handoff once and captures its exact completed brief instead of the preceding answer', async () => {
   const f = fixture(), edit = editing(f), token = '0123456789abcdef0123456789abcdef';
   f.entry.turn.status = 'complete'; f.entry.turn.items[2].completed = true;

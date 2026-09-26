@@ -19,7 +19,8 @@ describe('finish producer to durable injection integration', () => {
   it('releases the held answer for an after-turn head without letting a later finish checkpoint overtake', async () => {
     directory = await makeTempDir('clf-finish-queue-');
     initConfigPath(directory); initDurableStore(directory); initSessionStore(directory);
-    await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, finishTool: true } });
+    const config = defaultConfig();
+    await saveConfig({ ...config, sessions: { ...config.sessions, record: true }, ui: { ...config.ui, finishTool: true } });
     const conversationId = randomUUID();
     const session = await createSession({ conversationId, title: 'Ordered queue' });
     hooks.caller = { sessionId: session.id, conversationId };

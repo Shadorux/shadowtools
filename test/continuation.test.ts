@@ -110,7 +110,12 @@ beforeAll(async () => {
   initConfigPath(dir);
   initSessionStore(dir);
   const config = defaultConfig();
-  await saveConfig({ ...config, multiAgent: { ...config.multiAgent, enabled: true, maxWorkers: 3 } });
+  await saveConfig({
+    ...config,
+    sessions: { ...config.sessions, record: true },
+    compaction: { ...config.compaction, auto: true },
+    multiAgent: { ...config.multiAgent, enabled: true, maxWorkers: 3 }
+  });
 });
 
 afterAll(async () => {

@@ -13,7 +13,8 @@ let dir: string;
 beforeAll(async () => {
   dir = await makeTempDir('windows-desktop-recording-');
   initConfigPath(dir); initSessionStore(dir);
-  await saveConfig(defaultConfig());
+  const config = defaultConfig();
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true } });
 });
 afterAll(async () => {
   await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();

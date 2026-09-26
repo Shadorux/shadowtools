@@ -5,7 +5,6 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { afterEach, expect, it, vi } from 'vitest';
-import { DEFAULT_GOAL_MODEL, DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
 import { BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from '../src/shared/browser-control.js';
 
 let dom: JSDOM | null = null;
@@ -47,20 +46,13 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
     ui: { minimizeToTray: true, autoConnect: false, privacyScreenshots: false, theme: 'light' },
     sessions: { record: true, retainDays: 30, advisoryTokens: 300000, limitTokens: 400000 },
     compaction: { auto: true, autoTokens: 300000 },
-    multiAgent: { enabled: false, maxWorkers: 2, allowUnattributedCalls: false, recoverAgentTabs: true },
-    goal: {
-      enabled: false,
-      model: 'deepseek/deepseek-v4-flash',
-      reasoning: 'default' as const,
-      prompt: DEFAULT_GOAL_SYSTEM_PROMPT
-    }
+    multiAgent: { enabled: false, maxWorkers: 2, allowUnattributedCalls: false, recoverAgentTabs: true }
   };
   const state = {
     config: baseConfig,
     status: { state: 'disconnected', detail: '', publicUrl: null, localUrl: null, handshakeAt: null, lastRequestAt: null, lastToolCallAt: null, health: null, surfaces: [] },
     hasApiKey: false,
-    hasGoalKey: false,
-    resolvedBinary: null,
+        resolvedBinary: null,
     bundledTunnelVersion: null,
     bridge: { running: true, port: 8765, paired: false, present: false, lastSeenAt: null, extensionVersion: null },
     update: { current: '2.0.2', latest: null, stage: 'idle', error: null, checkedAt: null }
@@ -104,28 +96,6 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
   stateListener(structuredClone(state));
   expect(w.document.activeElement).toBe(allowUnattributed);
   expect(allowUnattributed.checked).toBe(true);
-
-  // The settings sheet used to bypass the dirty-field guard used by Home. An unrelated
-  // status push therefore erased this value while the user was still typing it.
-  const compactionThreshold = w.document.getElementById('autoCompactTokens') as HTMLInputElement;
-  compactionThreshold.focus();
-  compactionThreshold.value = '355000';
-  stateListener(structuredClone(state));
-  expect(w.document.activeElement).toBe(compactionThreshold);
-  expect(compactionThreshold.value).toBe('355000');
-
-  compactionThreshold.blur();
-  const updatedThreshold = structuredClone(state) as any;
-  updatedThreshold.config.compaction.autoTokens = 320000;
-  stateListener(updatedThreshold);
-  expect(compactionThreshold.value).toBe('320000');
-
-  const goalPrompt = w.document.getElementById('goalPrompt') as HTMLTextAreaElement;
-  goalPrompt.focus();
-  goalPrompt.value = 'USER IS STILL EDITING THIS PROMPT';
-  stateListener(structuredClone(state));
-  expect(w.document.activeElement).toBe(goalPrompt);
-  expect(goalPrompt.value).toBe('USER IS STILL EDITING THIS PROMPT');
 
   // The health card reports the live surface projection rather than a hand-maintained
   // denominator. Tool consolidation/additions should never leave the UI saying "of 9"
@@ -203,20 +173,13 @@ it('serializes settings intent so rapid toggles and later UI changes cannot undo
     ui: { minimizeToTray: true, autoConnect: false, privacyScreenshots: false, theme: 'light' as 'light' | 'dark' },
     sessions: { record: true, retainDays: 30, advisoryTokens: 300000, limitTokens: 400000 },
     compaction: { auto: true, autoTokens: 300000 },
-    multiAgent: { enabled: false, maxWorkers: 2, allowUnattributedCalls: false, recoverAgentTabs: true },
-    goal: {
-      enabled: false,
-      model: 'deepseek/deepseek-v4-flash',
-      reasoning: 'default' as const,
-      prompt: DEFAULT_GOAL_SYSTEM_PROMPT
-    }
+    multiAgent: { enabled: false, maxWorkers: 2, allowUnattributedCalls: false, recoverAgentTabs: true }
   };
   const appState = (config: typeof baseConfig) => ({
     config,
     status: { state: 'disconnected', detail: '', publicUrl: null, localUrl: null, handshakeAt: null, lastRequestAt: null, lastToolCallAt: null, health: null, surfaces: [] },
     hasApiKey: false,
-    hasGoalKey: false,
-    resolvedBinary: null,
+        resolvedBinary: null,
     bundledTunnelVersion: null,
     bridge: { running: true, port: 8765, paired: false, present: false, lastSeenAt: null, extensionVersion: null },
     update: { current: '2.0.2', latest: null, stage: 'idle', error: null, checkedAt: null }
@@ -299,29 +262,19 @@ it('serializes settings intent so rapid toggles and later UI changes cannot undo
   await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
-/**
- * The goal loop's settings panel.
- *
- * Three things are worth pinning here and the rest is layout: the key never travels with the
- * settings, the catalogue is only fetched when somebody asks for it, and an install with no
- * key says so in the words the extension says it in.
- */
-
-interface GoalMount {
+interface RendererMount {
   window: JSDOM['window'];
   calls: any[];
   keys: Array<{ method: string; value: string }>;
-  modelPages: any[];
   push(state: any): void;
   state: any;
 }
 
 async function mountChat(
   overrides: Record<string, unknown> = {},
-  models: any[] = [],
+  _models: any[] = [],
   apiOverrides: Record<string, (...args: any[]) => any> = {},
-  initialGoal: Record<string, unknown> = {}
-): Promise<GoalMount> {
+): Promise<RendererMount> {
   const html = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'index.html'), 'utf8');
   dom = new JSDOM(html, { url: 'https://local.test/', pretendToBeVisual: true });
   const w = dom.window;
@@ -353,21 +306,13 @@ async function mountChat(
     ui: { minimizeToTray: true, autoConnect: false, privacyScreenshots: false, theme: 'light' as const },
     sessions: { record: true, retainDays: 30, advisoryTokens: 300000, limitTokens: 400000 },
     compaction: { auto: true, autoTokens: 300000 },
-    multiAgent: { enabled: false, maxWorkers: 2, allowUnattributedCalls: false, recoverAgentTabs: true },
-    goal: {
-      enabled: false,
-      model: 'deepseek/deepseek-v4-flash',
-      reasoning: 'default' as const,
-      prompt: DEFAULT_GOAL_SYSTEM_PROMPT,
-      ...initialGoal
-    }
+    multiAgent: { enabled: false, maxWorkers: 2, allowUnattributedCalls: false, recoverAgentTabs: true }
   };
   const state: any = {
     config,
     status: { state: 'disconnected', detail: '', publicUrl: null, localUrl: null, handshakeAt: null, lastRequestAt: null, lastToolCallAt: null, health: null, surfaces: [] },
     hasApiKey: false,
-    hasGoalKey: false,
-    resolvedBinary: null,
+        resolvedBinary: null,
     bundledTunnelVersion: null,
     bridge: { running: true, port: 8765, paired: false, present: false, lastSeenAt: null, extensionVersion: null },
     update: { current: '2.0.2', latest: null, stage: 'idle', error: null, checkedAt: null },
@@ -376,7 +321,6 @@ async function mountChat(
   let listener: (next: any) => void = () => undefined;
   const calls: any[] = [];
   const keys: Array<{ method: string; value: string }> = [];
-  const modelPages: any[] = [];
   const ok = (data: any) => Promise.resolve({ ok: true as const, data });
   const api: any = new Proxy(
     {
@@ -399,18 +343,9 @@ async function mountChat(
         state.config = { ...state.config, ...structuredClone(patch) };
         return ok(state);
       },
-      setGoalKey: (value: string) => {
-        keys.push({ method: 'setGoalKey', value });
-        return ok({ ...state, hasGoalKey: value !== '' });
-      },
       setApiKey: (value: string) => {
         keys.push({ method: 'setApiKey', value });
         return ok(state);
-      },
-      listGoalModels: (offset: number) => {
-        const page = { models: models.slice(offset, offset + 20), total: models.length, offset };
-        modelPages.push(page);
-        return ok(page);
       },
       ...apiOverrides
     },
@@ -424,7 +359,7 @@ async function mountChat(
   Object.defineProperty(w, 'api', { value: api, configurable: true });
   await import('../src/renderer/main.js');
   await new Promise((resolve) => setTimeout(resolve, 0));
-  return { window: w, calls, keys, modelPages, state, push: (next) => listener(next) };
+  return { window: w, calls, keys, state, push: (next) => listener(next) };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -721,52 +656,6 @@ it('attaches pasted screenshot files with previews while preserving ordinary tex
   expect(dropFiles).toHaveBeenCalledTimes(1);
 });
 
-it('preserves the selected OpenRouter model through an unchanged custom-provider round trip', async () => {
-  const mounted = await mountChat();
-  const w = mounted.window;
-  const original = 'z-ai/glm-5.3-flash';
-  mounted.state.config.goal = { ...mounted.state.config.goal, model: original, provider: { kind: 'openrouter', baseUrl: '' } };
-  mounted.push(mounted.state);
-  const provider = w.document.getElementById('goalProvider') as HTMLSelectElement;
-  provider.value = 'custom'; provider.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
-  // Repainting custom settings must not replace the hidden OpenRouter picker's model.
-  mounted.push({ ...mounted.state, hasCustomProviderKey: false });
-  provider.value = 'openrouter'; provider.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(2));
-  expect(mounted.calls[1].goal).toMatchObject({ provider: { kind: 'openrouter' }, model: original });
-  expect(w.document.getElementById('goalModelName')!.textContent).toBe(original);
-});
-
-it('uses the OpenRouter default when opened directly on an unrelated custom deployment', async () => {
-  const mounted = await mountChat({}, [], {}, { model: 'llama3.1', provider: { kind: 'custom', baseUrl: 'http://localhost:8000/v1' } });
-  const provider = mounted.window.document.getElementById('goalProvider') as HTMLSelectElement;
-  provider.value = 'openrouter';
-  provider.dispatchEvent(new mounted.window.Event('change', { bubbles: true }));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
-  expect(mounted.calls[0].goal).toMatchObject({ provider: { kind: 'openrouter' }, model: DEFAULT_GOAL_MODEL });
-});
-
-it('saves a custom deployment id and returns to the known OpenRouter model', async () => {
-  const mounted = await mountChat();
-  const w = mounted.window;
-  const provider = w.document.getElementById('goalProvider') as HTMLSelectElement;
-  provider.value = 'custom';
-  provider.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
-  expect(mounted.calls[0].goal.provider.kind).toBe('custom');
-  expect(w.document.getElementById('goalCustomPanel')?.hidden).toBe(false);
-  const model = w.document.getElementById('goalCustomModel') as HTMLInputElement;
-  model.value = 'llama3.1';
-  model.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(2));
-  expect(mounted.calls[1].goal.model).toBe('llama3.1');
-  provider.value = 'openrouter';
-  provider.dispatchEvent(new w.Event('change', { bubbles: true }));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(3));
-  expect(mounted.calls[2].goal).toMatchObject({ provider: { kind: 'openrouter' }, model: 'deepseek/deepseek-v4-flash' });
-});
-
 it('saves the ChatGPT browser choice from its settings control and restores it on state push', async () => {
   const mounted = await mountChat();
   const w = mounted.window;
@@ -906,15 +795,6 @@ it('preserves an in-progress root rename across unrelated state pushes and cance
   expect(doc.querySelector('.root-rename')).toBeNull();
   expect(doc.querySelector('.root')).toBeNull();
 });
-
-/** Fake OpenRouter catalogue, already in the order the app is expected to keep. */
-const catalogue = (count: number) =>
-  Array.from({ length: count }, (_, index) => ({
-    id: `vendor${index}/model-${index}`,
-    name: `Model ${index}`,
-    created: 1_800_000_000 - index * 86_400,
-    contextLength: 128_000
-  }));
 
 it('guides rootless setup from the capabilities that actually need a filesystem root', async () => {
   const mounted = await mountChat({ hasApiKey: true });
@@ -1109,15 +989,12 @@ it('always requires the live browser because recording is an invariant', async (
   browserFree.config.multiAgent.enabled = false;
   browserFree.config.capabilities.screen = false;
   browserFree.config.capabilities.control = false;
-  browserFree.config.goal.enabled = true;
   browserFree.bridge = { running: false, port: null, paired: true, present: false, lastSeenAt: Date.now() };
   mounted.push(browserFree);
   expect(browserStep.hidden).toBe(false);
   expect(browserStep.classList.contains('is-current')).toBe(true);
   expect(doc.getElementById('wizard')!.classList.contains('is-tidy')).toBe(false);
   expect(doc.getElementById('bridgeState')!.textContent).not.toContain('not needed');
-  expect((doc.getElementById('chatAutomation') as HTMLSelectElement).disabled).toBe(false);
-  expect(doc.getElementById('chatAutomation')!.title).toContain('Continue');
 });
 
 /**
@@ -1258,313 +1135,6 @@ it('keeps plugin connection controls out of general Setup and preserves its tunn
   expect(doc.querySelector('[data-panel="setup"] [data-link="https://chatgpt.com/plugins"]')).not.toBeNull();
 });
 
-/**
- * The exact sentence, because it is the same sentence the composer's settings sheet shows
- * and the two are meant to be recognisably one message rather than two paraphrases.
- */
-it('reports stored API credentials without exposing app-wide Goal switches', async () => {
-  const mounted = await mountChat();
-  expect(mounted.window.document.getElementById('goalEnabled')).toBeNull();
-  expect((mounted.window.document.getElementById('goalKeyRemove') as HTMLButtonElement).disabled).toBe(true);
-
-  mounted.push({ ...mounted.state, hasGoalKey: true });
-  await settle();
-  expect(mounted.window.document.getElementById('goalKeyState')!.textContent).toContain('A key is stored');
-  expect((mounted.window.document.getElementById('goalKeyRemove') as HTMLButtonElement).disabled).toBe(false);
-});
-
-/**
- * The key goes to the one channel that encrypts it and never to the settings file. This is
- * the whole reason the goal request is made by the app and not by the extension, so it is
- * worth an assertion rather than a comment.
- */
-it('sends the key to the secret store and never into the settings patch', async () => {
-  const mounted = await mountChat();
-  const field = mounted.window.document.getElementById('goalKey') as HTMLInputElement;
-  field.value = 'sk-or-v1-not-a-real-key';
-  field.dispatchEvent(new mounted.window.Event('blur'));
-  await settle();
-
-  expect(mounted.keys).toEqual([{ method: 'setGoalKey', value: 'sk-or-v1-not-a-real-key' }]);
-  // Cleared from the input as well: a stored key has no reason to stay on screen.
-  expect(field.value).toBe('');
-  expect(JSON.stringify(mounted.calls)).not.toContain('sk-or-v1');
-});
-
-it('keeps secret-key input on secure-storage failure', async () => {
-  const failed = await mountChat({}, [], {
-    setGoalKey: () => Promise.resolve({ ok: false, error: 'safeStorage unavailable' }),
-    setApiKey: () => Promise.resolve({ ok: false, error: 'safeStorage unavailable' })
-  });
-  const goalFailed = failed.window.document.getElementById('goalKey') as HTMLInputElement;
-  goalFailed.value = 'sk-or-v1-retry-me';
-  goalFailed.dispatchEvent(new failed.window.Event('blur'));
-  const apiFailed = failed.window.document.getElementById('apiKey') as HTMLInputElement;
-  apiFailed.value = 'sk-retry-me';
-  apiFailed.dispatchEvent(new failed.window.Event('blur'));
-  await settle();
-  expect(goalFailed.value).toBe('sk-or-v1-retry-me');
-  expect(apiFailed.value).toBe('sk-retry-me');
-});
-
-it('never lets an older secret save erase a newer value typed while IPC is in flight', async () => {
-  let releaseGoal!: (value: any) => void;
-  let releaseApi!: (value: any) => void;
-  const deferred = await mountChat({}, [], {
-    setGoalKey: () => new Promise((resolve) => (releaseGoal = resolve)),
-    setApiKey: () => new Promise((resolve) => (releaseApi = resolve))
-  });
-  const goal = deferred.window.document.getElementById('goalKey') as HTMLInputElement;
-  goal.value = 'sk-or-v1-old';
-  goal.dispatchEvent(new deferred.window.Event('blur'));
-  goal.value = 'sk-or-v1-new';
-  const api = deferred.window.document.getElementById('apiKey') as HTMLInputElement;
-  api.value = 'sk-old';
-  api.dispatchEvent(new deferred.window.Event('blur'));
-  api.value = 'sk-new';
-
-  releaseGoal({ ok: true, data: { ...deferred.state, hasGoalKey: true } });
-  releaseApi({ ok: true, data: { ...deferred.state, hasApiKey: true } });
-  await settle();
-  await settle();
-  expect(goal.value).toBe('sk-or-v1-new');
-  expect(api.value).toBe('sk-new');
-});
-
-it('does not turn whitespace in the OpenRouter key field into a remove-key request', async () => {
-  const mounted = await mountChat({ hasGoalKey: true });
-  const field = mounted.window.document.getElementById('goalKey') as HTMLInputElement;
-  field.value = '   ';
-  field.dispatchEvent(new mounted.window.Event('blur'));
-  await settle();
-  expect(mounted.keys).toEqual([]);
-  expect(field.value).toBe('   ');
-});
-
-it('opens, saves and restores the editable goal prompt', async () => {
-  const mounted = await mountChat({ hasGoalKey: true });
-  const doc = mounted.window.document;
-  const panel = doc.getElementById('goalPromptPanel')!;
-  const edit = doc.getElementById('goalPromptEdit') as HTMLButtonElement;
-  const prompt = doc.getElementById('goalPrompt') as HTMLTextAreaElement;
-
-  expect(panel.hidden).toBe(true);
-  edit.click();
-  expect(panel.hidden).toBe(false);
-  expect(prompt.value).toBe(DEFAULT_GOAL_SYSTEM_PROMPT);
-
-  prompt.value = 'custom gate: continue only explicit missing work. otherwise NO_REPLY.';
-  prompt.dispatchEvent(new mounted.window.Event('change'));
-  await settle();
-  await settle();
-  expect(mounted.calls.at(-1)?.goal.prompt).toBe(prompt.value);
-
-  (doc.getElementById('goalPromptReset') as HTMLButtonElement).click();
-  await settle();
-  await settle();
-  expect(prompt.value).toBe(DEFAULT_GOAL_SYSTEM_PROMPT);
-  expect(mounted.calls.at(-1)?.goal.prompt).toBe(DEFAULT_GOAL_SYSTEM_PROMPT);
-});
-
-/**
- * The catalogue is a network request to somebody else's service, so it happens when a person
- * asks for it and not when the settings tab is opened.
- */
-it('loads the model catalogue only when the picker is opened, twenty at a time', async () => {
-  const mounted = await mountChat({ hasGoalKey: true }, catalogue(45));
-  const doc = mounted.window.document;
-  expect(mounted.modelPages).toEqual([]);
-
-  (doc.getElementById('goalPick') as HTMLButtonElement).click();
-  await settle();
-  expect(mounted.modelPages).toHaveLength(1);
-  expect(doc.querySelectorAll('.goal-model')).toHaveLength(20);
-  // Newest first, which is the whole point of the ordering.
-  expect((doc.querySelector('.goal-model .goal-model-name') as HTMLElement).textContent).toBe('Model 0');
-  expect(doc.getElementById('goalModelsState')!.textContent).toContain('45');
-
-  (doc.getElementById('goalMore') as HTMLButtonElement).click();
-  await settle();
-  expect(doc.querySelectorAll('.goal-model')).toHaveLength(40);
-  (doc.getElementById('goalMore') as HTMLButtonElement).click();
-  await settle();
-  expect(doc.querySelectorAll('.goal-model')).toHaveLength(45);
-  // Nothing left to page, so the control stops offering.
-  expect((doc.getElementById('goalMore') as HTMLButtonElement).hidden).toBe(true);
-});
-
-/**
- * "Load 20 more" is the deliberate way to ask for the next page. Scrolling to the bottom of
- * the list is the way people actually ask, and it did nothing at all: the list simply ended
- * at twenty with four hundred still to come and no sign that there was a button below it.
- *
- * The repaint is the other half. The list is rebuilt whole on every page, and emptying an
- * element scrolls it back to the top — so even once it paged, the reader was thrown back to
- * the newest model, which is the one they had just scrolled away from.
- */
-it('pages the catalogue in as the list is scrolled, without losing the reader\'s place', async () => {
-  const mounted = await mountChat({ hasGoalKey: true }, catalogue(45));
-  const doc = mounted.window.document;
-  (doc.getElementById('goalPick') as HTMLButtonElement).click();
-  await settle();
-  expect(doc.querySelectorAll('.goal-model')).toHaveLength(20);
-
-  // jsdom does no layout, so the box has to be described: a 260px window onto a list whose
-  // height follows the number of rows actually in it, the way the real one does.
-  const list = doc.getElementById('goalModelList')!;
-  Object.defineProperty(list, 'clientHeight', { value: 260, configurable: true });
-  Object.defineProperty(list, 'scrollHeight', {
-    get: () => list.querySelectorAll('.goal-model').length * 50,
-    configurable: true
-  });
-  Object.defineProperty(list, 'scrollTop', { value: 0, writable: true, configurable: true });
-  const scroll = (top: number): void => {
-    (list as unknown as { scrollTop: number }).scrollTop = top;
-    list.dispatchEvent(new mounted.window.Event('scroll'));
-  };
-
-  // Halfway down twenty rows: nothing is asked for.
-  scroll(300);
-  await settle();
-  expect(mounted.modelPages).toHaveLength(1);
-  expect(doc.querySelectorAll('.goal-model')).toHaveLength(20);
-
-  // At the end of them: the next twenty arrive without the button being touched.
-  scroll(740);
-  await settle();
-  expect(doc.querySelectorAll('.goal-model')).toHaveLength(40);
-  // And the list is still where it was left, not back at the newest model.
-  expect(list.scrollTop).toBe(740);
-
-  // Forty rows is 2000px now, so arriving at the end again pages in the last five.
-  scroll(1740);
-  await settle();
-  expect(doc.querySelectorAll('.goal-model')).toHaveLength(45);
-  expect((doc.getElementById('goalMore') as HTMLButtonElement).hidden).toBe(true);
-
-  // Nothing left to page: scrolling on does not ask OpenRouter again.
-  const spent = mounted.modelPages.length;
-  scroll(2200);
-  await settle();
-  expect(mounted.modelPages).toHaveLength(spent);
-});
-
-/**
- * A closed picker measures zero in every direction, which reads as "scrolled to the end".
- * Left unguarded, every repaint of the settings sheet would page the whole catalogue in
- * behind a panel nobody has open — hundreds of models, on somebody else's service.
- */
-it('never pages the catalogue while the picker is closed', async () => {
-  const mounted = await mountChat({ hasGoalKey: true }, catalogue(45));
-  const doc = mounted.window.document;
-  (doc.getElementById('goalPick') as HTMLButtonElement).click();
-  await settle();
-  expect(mounted.modelPages).toHaveLength(1);
-
-  // Close it again, then push a fresh state through: applyGoal repaints the list.
-  (doc.getElementById('goalPick') as HTMLButtonElement).click();
-  expect(doc.getElementById('goalModels')!.hidden).toBe(true);
-  mounted.push({ ...mounted.state, hasGoalKey: true });
-  await settle();
-
-  expect(mounted.modelPages).toHaveLength(1);
-  expect(doc.querySelectorAll('.goal-model')).toHaveLength(20);
-});
-
-/** Choosing one stores it verbatim: the id is what OpenRouter wants, not a display name. */
-it('saves the chosen model id', async () => {
-  const mounted = await mountChat({ hasGoalKey: true }, catalogue(3));
-  const doc = mounted.window.document;
-  (doc.getElementById('goalPick') as HTMLButtonElement).click();
-  await settle();
-  (doc.querySelectorAll('.goal-model')[1] as HTMLButtonElement).click();
-  await settle();
-
-  expect(doc.getElementById('goalModelName')!.textContent).toBe('vendor1/model-1');
-  expect(mounted.calls.at(-1)?.goal).toMatchObject({ model: 'vendor1/model-1' });
-});
-
-it('saves GLM High and Max from catalogue-specific options and drops unsupported levels on model selection', async () => {
-  const glm = { id: 'z-ai/glm-5.3', name: 'GLM 5.3', created: 100, contextLength: 200000,
-    reasoning: { supportedEfforts: ['max', 'high', 'low'], defaultEffort: 'max', mandatory: true } };
-  const plain = { id: 'plain/model', name: 'Plain', created: 1, contextLength: 1000 };
-  const mounted = await mountChat({ hasGoalKey: true }, [glm, plain]);
-  const doc = mounted.window.document;
-  (doc.getElementById('goalPick') as HTMLButtonElement).click();
-  await settle();
-  (doc.querySelector('[data-model="z-ai/glm-5.3"]') as HTMLButtonElement).click();
-  await settle();
-  const select = doc.getElementById('goalReasoning') as HTMLSelectElement;
-  expect([...select.options].filter(option => !option.disabled).map(option => option.value)).toEqual(['default', 'max', 'high', 'low']);
-  for (const reasoning of ['high', 'max']) {
-    select.value = reasoning;
-    select.dispatchEvent(new mounted.window.Event('change', { bubbles: true }));
-    await settle();
-    expect(mounted.calls.at(-1)?.goal).toMatchObject({ model: glm.id, reasoning });
-  }
-  (doc.querySelector('[data-model="plain/model"]') as HTMLButtonElement).click();
-  await settle();
-  expect([...select.options].map(option => option.value)).toEqual(['default']);
-  expect(mounted.calls.at(-1)?.goal).toMatchObject({ model: plain.id, reasoning: 'default' });
-});
-
-it('loads supported levels for the saved model without paging to its catalogue row', async () => {
-  const selectedModel = { id: 'saved/model', name: 'Saved', created: 1, contextLength: 200000,
-    reasoning: { supportedEfforts: ['max', 'high', 'low'], defaultEffort: 'max', mandatory: true } };
-  const mounted = await mountChat({}, [], {
-    listGoalModels: async () => ({ ok: true, data: { models: [], total: 500, selectedModel } })
-  }, { model: selectedModel.id, reasoning: 'high' });
-  const select = mounted.window.document.getElementById('goalReasoning') as HTMLSelectElement;
-  select.focus();
-  await settle();
-  expect(select.value).toBe('high');
-  expect(select.selectedOptions[0]?.disabled).toBe(false);
-  expect([...select.options].map(option => option.value)).toEqual(['default', 'max', 'high', 'low']);
-  expect(mounted.calls).toHaveLength(0);
-});
-
-/** A provider that cannot be reached says so and changes nothing about what is in use. */
-it('keeps the model in use when OpenRouter cannot be reached', async () => {
-  const mounted = await mountChat({ hasGoalKey: true }, catalogue(2));
-  const doc = mounted.window.document;
-  (mounted.window as any).api.listGoalModels = () => Promise.resolve({ ok: false, error: 'offline' });
-
-  (doc.getElementById('goalPick') as HTMLButtonElement).click();
-  await settle();
-  expect(doc.getElementById('goalModelsState')!.textContent).toContain('unchanged');
-  expect(doc.getElementById('goalModelName')!.textContent).toBe('deepseek/deepseek-v4-flash');
-});
-
-it('retains a fresh Goal and first message when rejected sends return to New Chat', async () => {
-  const sendInput = vi.fn(async () => ({ ok: false, error: 'test delivery stopped' }));
-  const mounted = await mountChat({}, [], { sendInput,
-    getChatModels: async () => ({ ok: true, data: { state: 'ready', requestedAt: 1, observedAt: Date.now(), models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', efforts: ['none', 'high'] }] } }),
-    draftGoalOpening: async () => ({ ok: true, data: { reply: 'Generated opening', model: 'fixture' } })
-  });
-  const w = mounted.window, doc = w.document;
-  (doc.getElementById('newChat') as HTMLButtonElement).click();
-  await settle();
-  expect(doc.getElementById('sessionControls')!.hidden).toBe(false);
-  (doc.querySelector('[data-mode="goal"]') as HTMLButtonElement).click();
-  const objective = doc.getElementById('sessionObjective') as HTMLTextAreaElement;
-  objective.value = 'Build and verify the requested feature';
-  objective.dispatchEvent(new w.Event('input', { bubbles: true }));
-  (doc.getElementById('saveSessionObjective') as HTMLButtonElement).click();
-  await settle();
-  expect(sendInput).toHaveBeenCalledWith(expect.objectContaining({ text: 'Generated opening', sessionId: null, automation: 'goal', objective: 'Build and verify the requested feature' }));
-  const input = doc.getElementById('chatInput') as HTMLTextAreaElement;
-  input.value = 'Start with the existing code';
-  doc.getElementById('composer')!.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
-  await settle();
-  expect(sendInput).toHaveBeenCalledWith(expect.objectContaining({ sessionId: null, automation: 'goal', objective: 'Build and verify the requested feature' }));
-  (doc.getElementById('newChat') as HTMLButtonElement).click();
-  await settle();
-  expect(objective.value).toBe('Build and verify the requested feature');
-  expect(input.value).toBe('Start with the existing code');
-  expect((doc.getElementById('chatAutomation') as HTMLSelectElement).value).toBe('goal');
-});
-
-
 it('gives twenty rapid New Chat sends independent visible local chats before any provider receipt', async () => {
   const rows: any[] = [], summaries: any[] = [];
   const ok = (data: any) => ({ ok: true, data });
@@ -1574,11 +1144,7 @@ it('gives twenty rapid New Chat sends independent visible local chats before any
     summaries.push({ id: row.sessionId, title: row.text, conversationId: null, origin: { kind: 'desktop' }, createdAt: row.createdAt, updatedAt: row.createdAt, eventCount: 0, projectId: null, selectedModel: null, usage: {} });
     return ok(row);
   });
-  const setInputAutomation = vi.fn(async (id: string, automation: string, loopAfterTurn?: boolean) => {
-    const row = rows.find(row => row.id === id); row.automation = automation; if (loopAfterTurn !== undefined) row.loopAfterTurn = loopAfterTurn; return ok(true);
-  });
-  const setSessionAutomation = vi.fn();
-  const mounted = await mountChat({}, [], { sendInput, setInputAutomation, setSessionAutomation,
+  const mounted = await mountChat({}, [], { sendInput,
     getChatModels: async () => ok({ state: 'ready', requestedAt: 1, observedAt: Date.now(), models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', efforts: ['high'] }] }),
     listInputs: async () => ok([...rows]), listPausedHelpers: async () => ok([]),
     listSessions: async () => ok({ sessions: [...summaries], activeId: null, pressure: [] }),
@@ -1594,12 +1160,6 @@ it('gives twenty rapid New Chat sends independent visible local chats before any
     expect(doc.querySelector(`[data-input-id="${rows[index]!.id}"]`)?.textContent).toContain(rows[index]!.text);
     expect((doc.getElementById('composerModel') as HTMLSelectElement).value).toBe('gpt-5.6-sol');
   }
-  (doc.querySelector('[data-mode=loop]') as HTMLButtonElement).click(); await settle();
-  const loop = doc.getElementById('loopDelivery') as HTMLSelectElement; loop.value = 'after-turn'; loop.dispatchEvent(new w.Event('change')); await settle();
-  expect(setInputAutomation).toHaveBeenLastCalledWith(rows[19]!.id, 'loop', true);
-  expect(setSessionAutomation).not.toHaveBeenCalled();
-  expect(rows[19]).toMatchObject({ automation: 'loop', loopAfterTurn: true });
-  expect(rows.slice(0, 19).every(row => row.automation !== 'loop')).toBe(true);
   expect(new Set(rows.map(row => row.sessionId)).size).toBe(20);
   expect(rows.every(row => row.state === 'queued' && row.deliveredAt === undefined)).toBe(true);
   expect(sendInput.mock.calls.every(([request]) => request.sessionId === null)).toBe(true);

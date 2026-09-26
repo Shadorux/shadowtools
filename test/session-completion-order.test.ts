@@ -13,7 +13,8 @@ beforeEach(async () => {
   initConfigPath(dir);
   initSessionStore(dir);
   resetRecorderForTests();
-  await saveConfig(defaultConfig());
+  const config = defaultConfig();
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true } });
 });
 afterEach(async () => {
   await flushSessions();

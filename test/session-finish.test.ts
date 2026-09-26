@@ -44,7 +44,8 @@ beforeEach(async () => {
   hooks.listeners.clear();
   notify.mockReset();
   setFinishNotifier(notify);
-  await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, finishTool: true } });
+  const config = defaultConfig();
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true }, ui: { ...config.ui, finishTool: true } });
   conversationId = randomUUID();
   const session = await createSession({ conversationId, title: 'Finish test' });
   sessionId = session.id;

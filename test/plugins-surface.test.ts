@@ -53,7 +53,7 @@ async function rpc(surface: 'plugins' | 'core' | 'desktop', method: string, para
 beforeAll(async () => {
   directory = await makeTempDir('clf-plugins-surface-');
   initConfigPath(directory); await loadConfig(); initDurableStore(directory); initSessionStore(directory);
-  await updateConfig(config => ({ ...config, multiAgent: { ...config.multiAgent, enabled: false } }));
+  await updateConfig(config => ({ ...config, sessions: { ...config.sessions, record: true }, multiAgent: { ...config.multiAgent, enabled: false } }));
   endpoint = await startMcpServer(() => ({ roots: [], caps: effectiveCapabilities(getConfig()), readOnly: getConfig().readOnly }));
 });
 beforeEach(async () => { plugin.enabled = true; plugin.call.mockClear(); plugin.redactResult.mockClear(); await updateConfig(config => ({ ...config, readOnly: false })); });

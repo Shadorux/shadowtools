@@ -15,7 +15,8 @@ let dir: string;
 beforeEach(async () => {
   dir = await makeTempDir('process-history-');
   initSessionStore(dir); initConfigPath(dir);
-  await saveConfig(defaultConfig());
+  const config = defaultConfig();
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true } });
 });
 afterEach(async () => {
   await flushRecorder(); await flushSessions();

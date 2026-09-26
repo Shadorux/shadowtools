@@ -9554,7 +9554,6 @@
       /** So a test settles a turn by the real window rather than a copy of the number. */
       TURN_SETTLE_MS,
       STALL_MS,
-      GOAL_RETRY_MS,
       PRESENTATION_SCROLL_IDLE_MS,
       /** Test-only: production defaults ON; tests opt into renderer cases explicitly. */
       setRenderStream: (on) => {

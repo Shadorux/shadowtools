@@ -47,8 +47,6 @@ describe('Chinese app interface', () => {
     const input = document.getElementById('chatInput') as HTMLTextAreaElement;
     input.value = 'Save\n用户草稿 <script>not markup</script> 🙂';
     input.setSelectionRange(2, 7);
-    const automation = document.getElementById('chatAutomation') as HTMLSelectElement;
-    automation.value = 'loop';
     const icons = [...document.querySelectorAll('svg')];
     const strong = document.querySelector('.plugin-refresh-guide strong');
     const savedHTML = strong!.outerHTML;
@@ -66,7 +64,6 @@ describe('Chinese app interface', () => {
       expect(document.getElementById('chatInput')).toBe(input);
       expect(input.value).toBe('Save\n用户草稿 <script>not markup</script> 🙂');
       expect([input.selectionStart, input.selectionEnd]).toEqual([2, 7]);
-      expect(automation.value).toBe('loop');
       expect(authored.textContent).toBe('Save');
       expect(action.querySelector('img')).toBeNull();
       expect(action.textContent).toBe(locale === 'zh-CN' ? '移除 Save <img src=x>' : 'Remove Save <img src=x>');

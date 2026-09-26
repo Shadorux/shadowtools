@@ -837,8 +837,9 @@ describe('surface boundaries', () => {
         (BROWSER_TOOLS as readonly string[]).includes(tool.name)
           ? (tool.name === 'browser_action' ? 4_300 : 2_300)
           : IS_WINDOWS && desktopTools.includes(tool)
-          // Largest Window2 method is click at 882 bytes; composition is 1458 bytes.
-          ? (tool.name === 'exec' ? 1_500 : 950)
+          // `capture_after` lets an input action return the resulting frame without another
+          // model round-trip; click is currently ~1.1 KB while composition remains ~1.5 KB.
+          ? (tool.name === 'exec' ? 1_500 : 1_200)
           : tool.name === 'computer'
           // Retain the existing legacy schema allowance on macOS.
           ? 7_400

@@ -179,7 +179,7 @@ beforeAll(async () => {
   directory = await makeTempDir('clf-code-mode-mcp-');
   initConfigPath(directory); initDurableStore(directory); initSessionStore(directory); resetInputForTests();
   const config = defaultConfig();
-  await saveConfig({ ...config, multiAgent: { ...config.multiAgent, enabled: false }, ui: { ...config.ui, finishTool: true } });
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true }, multiAgent: { ...config.multiAgent, enabled: false }, ui: { ...config.ui, finishTool: true } });
   await fs.writeFile(path.join(directory, 'alpha.txt'), 'alpha PRIVATE_ALPHA');
   await fs.writeFile(path.join(directory, 'beta.txt'), 'beta PRIVATE_BETA');
   ctx = { roots: [{ name: 'workspace', path: directory }], caps: config.capabilities, readOnly: false, sessionTools: true, agentTools: true };

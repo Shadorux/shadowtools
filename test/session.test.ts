@@ -760,7 +760,7 @@ describe('session store', () => {
     const rows = await readEvents(summary.id, { kinds: ['assistant_message'], from: 21 });
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ messageId: 'first', time: 100, origin: first.event.origin,
-      seq: 30, turnId: 'original-turn', goalEligible: true, message: terminal.message });
+      seq: 30, turnId: 'original-turn', message: terminal.message });
     const repairedMeta = await fs.readFile(metaFile, 'utf8');
     resetSessionStoreForTests();
     expect((await getSession(summary.id))?.estimatedTokens).toBe(expectedTokens);
@@ -1855,7 +1855,7 @@ describe('handoff storage', () => {
     }
   }, 90_000);
 
-  it('never age-prunes closed recordings, including sessions without a handoff', async () => {
+  it('age-prunes closed recordings after the configured retention window', async () => {
     const stale = await createSession({ title: 'stale' });
     const kept = await createSession({ title: 'kept' });
     await saveHandoff(handoff(kept.id, '2026-01-03-cccccccc', Date.now()));
@@ -1880,14 +1880,12 @@ describe('handoff storage', () => {
     }
 
     const removed = await pruneSessions(30);
-    expect(removed).toBe(0);
-    expect(await getSession(kept.id)).not.toBeNull();
-    expect(await getSession(stale.id)).not.toBeNull();
-    await deleteSession(stale.id);
-    await deleteSession(kept.id);
+    expect(removed).toBeGreaterThanOrEqual(2);
+    expect(await getSession(kept.id)).toBeNull();
+    expect(await getSession(stale.id)).toBeNull();
   }, 90_000);
 
-  it('does not scan or remove even an expired recording when asked through the legacy prune seam', async () => {
+  it('removes only expired closed recordings when asked through the prune seam', async () => {
     const seed = await createSession({ title: 'retention catalog seed' });
     const seedSummary = await getSession(seed.id);
     expect(seedSummary).not.toBeNull();
@@ -1956,8 +1954,8 @@ describe('handoff storage', () => {
     );
 
     try {
-      expect(await pruneSessions(30)).toBe(0);
-      expect(removed).toEqual([]);
+      expect(await pruneSessions(30)).toBe(1);
+      expect(removed).toEqual([targetId]);
     } finally {
       rmSpy.mockRestore();
       statSpy.mockRestore();
@@ -1966,8 +1964,7 @@ describe('handoff storage', () => {
       resetSessionStoreForTests();
       await deleteSession(seed.id);
     }
-  // Keep the former pathological catalogue shape: the invariant is that no reader or remover
-  // is touched at all, regardless of how much expired history exists.
+  // Keep the former pathological catalogue shape: only the single expired recording is removed.
   }, 90_000);
 
   it('splits a long brief on blank lines and keeps every character', () => {
@@ -2016,8 +2013,8 @@ describe('handoff storage', () => {
 
 describe('canonical recorder 1.8', () => {
   it('caps the estimated tool return after rebind while retaining its full recorded result', async () => {
-    const config = defaultConfig();
-    await saveConfig({ ...config, compaction: { ...config.compaction, auto: true, autoTokens: 10000 } });
+      const config = defaultConfig();
+      await saveConfig({ ...config, sessions: { ...config.sessions, record: true }, compaction: { ...config.compaction, auto: true, autoTokens: 10000 } });
     try {
       const source = 'conv-fulltext-source';
       const destination = 'conv-fulltext-destination';

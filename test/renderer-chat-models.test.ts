@@ -176,7 +176,7 @@ it('renders the two observed Pro generations separately and sends their exact se
 
 it('replaces loading with the backend failure reason and an enabled retry control', async () => {
   dom = new JSDOM('<span id="composerModelLabel"></span><p id="composerModelStatus"></p><button id="refreshComposerModels"></button>' +
-    ['composerModel', 'composerReasoning', 'workerModel', 'workerReasoning', 'helperModel', 'helperReasoning'].map(id => `<select id="${id}"><option value="">Default</option></select>`).join(''));
+    ['composerModel', 'composerReasoning', 'workerModel', 'workerReasoning', 'planModel', 'planReasoning'].map(id => `<select id="${id}"><option value="">Default</option></select>`).join(''));
   const pending = { state: 'pending', requestedAt: 1, observedAt: null, models: [] };
   const failed = { ...pending, state: 'unavailable', error: 'Model discovery timed out. Retry.' };
   const getChatModels = vi.fn(async () => ({ ok: true, data: pending }));
@@ -197,7 +197,7 @@ it('replaces loading with the backend failure reason and an enabled retry contro
 
 it('uses observed account choices, preserves unverified defaults, and clears incompatible effort on model change', async () => {
   dom = new JSDOM('<span id="composerModelLabel"></span><p id="chatModelStatus"></p>' +
-    ['composerModel', 'composerReasoning', 'workerModel', 'workerReasoning', 'helperModel', 'helperReasoning'].map(id => `<select id="${id}"><option value="">Default</option></select>`).join(''));
+    ['composerModel', 'composerReasoning', 'workerModel', 'workerReasoning', 'planModel', 'planReasoning'].map(id => `<select id="${id}"><option value="">Default</option></select>`).join(''));
   const observed = { state: 'ready', requestedAt: 1, observedAt: Date.now(), models: [
     { id: 'first', label: 'GPT-5.6 Sol', efforts: ['high'] }, { id: 'second', label: 'GPT-6', efforts: ['medium'] }
   ] };
@@ -211,7 +211,7 @@ it('uses observed account choices, preserves unverified defaults, and clears inc
   const select = (id: string) => dom.window.document.getElementById(id) as HTMLSelectElement;
   expect(select('workerModel').value).toBe('unseen');
   expect(select('workerModel').selectedOptions[0]!.disabled).toBe(true);
-  expect(select('helperModel').value).toBe('first');
+  expect(select('planModel').value).toBe('first');
   expect([...select('composerModel').options].map(row => row.value)).toEqual(['first', 'second']);
   select('composerModel').value = 'first'; select('composerModel').dispatchEvent(new dom.window.Event('change'));
   expect([...select('composerReasoning').options].map(row => row.value)).toEqual(['high']);

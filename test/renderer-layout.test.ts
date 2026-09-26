@@ -4,8 +4,8 @@
  * The window has a preferred size and a fixed set of controls, so a control going missing
  * at that size or after a supported resize is a layout failure rather than a styling opinion. On the installed build
  * the session card's header held the title, a three-way view switcher and three buttons in
- * one flex row, and at the window's own default width "Compact & resume" — the primary
- * action of the whole app — was pushed entirely off the right edge. Not clipped: absent.
+ * one flex row, and at the window's own default width "Compact & resume" â€” the primary
+ * action of the whole app â€” was pushed entirely off the right edge. Not clipped: absent.
  *
  * jsdom does no layout, so this cannot measure pixels. What it can do is hold the
  * structural rules that made the overflow possible in the first place: the actions cluster
@@ -41,30 +41,16 @@ beforeAll(async () => {
 it('searches whole settings sections without empty headings, orphaned controls or lost conditional visibility', () => {
   const view = document.querySelector<HTMLElement>('[data-view="settings"]')!;
   const sections = [...view.querySelectorAll<HTMLElement>('.settings-section-title')];
-  const conditional = document.getElementById('goalModels')!;
-  expect(conditional.hidden).toBe(true);
   filterSettingsSections(view, '  SESSION FINISH  ');
   expect(sections.filter(section => !section.hidden).map(section => section.textContent)).toEqual(['Keep the turn open']);
   for (const section of sections) expect((section.nextElementSibling as HTMLElement).hidden).toBe(section.hidden);
   expect(document.getElementById('finishTool')!.closest('.pane')!.hasAttribute('hidden')).toBe(false);
-  expect(document.getElementById('goalKey')!.closest('.pane')!.hasAttribute('hidden')).toBe(true);
   filterSettingsSections(view, 'no-such-setting-123');
   expect(sections.every(section => section.hidden)).toBe(true);
   expect(document.getElementById('settingsSearchEmpty')!.hidden).toBe(false);
   filterSettingsSections(view, '');
   expect(sections.every(section => !section.hidden && !(section.nextElementSibling as HTMLElement).hidden)).toBe(true);
-  expect(conditional.hidden).toBe(true);
   expect(document.getElementById('settingsSearchEmpty')!.hidden).toBe(true);
-});
-
-it('limits the existing tool-detail preference to handoff briefs', () => {
-  const toggle = document.getElementById('goalIncludeToolCalls') as HTMLInputElement;
-  expect(toggle.type).toBe('checkbox');
-  expect(toggle.checked).toBe(false);
-  expect(toggle.closest('label')?.textContent).toContain('Include tool details in handoffs');
-  expect(toggle.closest('label')?.textContent).toContain('Goal and Loop use user messages and assistant updates and answers');
-  expect(chatSource).toContain("includeToolCalls: $<HTMLInputElement>('goalIncludeToolCalls').checked");
-  expect(chatSource).toContain("applyChatChecked($<HTMLInputElement>('goalIncludeToolCalls')");
 });
 
 it('keeps the context circle in the gear group rather than an auto-placed composer grid cell', () => {
@@ -72,11 +58,6 @@ it('keeps the context circle in the gear group rather than an auto-placed compos
   expect(group.classList.contains('composer-options')).toBe(true);
   expect(document.getElementById('contextMeter')!.parentElement).toBe(group);
   expect(document.getElementById('contextMeterInfo')!.parentElement?.id).toBe('contextMeter');
-});
-
-it('does not expose a periodic Astra continuation outside session_finish', () => {
-  expect(document.getElementById('goalImpulseMinutes')).toBeNull();
-  expect(chatSource).not.toContain("number('goalImpulseMinutes'");
 });
 
 /** The declarations of one selector, whitespace-normalised. */
@@ -94,7 +75,7 @@ describe('the session card header', () => {
   });
   /**
    * A gear, and nothing that starts work. Compact & resume is pressed in the ChatGPT tab,
-   * because the chat is what writes the brief — a button here would be a second way to
+   * because the chat is what writes the brief â€” a button here would be a second way to
    * start the one thing that must happen exactly once.
    */
   it('keeps global connection status out of the chat header and in the sidebar footer', () => {
@@ -128,7 +109,7 @@ describe('the session card header', () => {
       (button) => (button as HTMLElement).dataset.view
     );
     expect(views).toEqual(['timeline', 'compact']);
-    // The view itself still exists — only its entry point moved.
+    // The view itself still exists â€” only its entry point moved.
     expect(document.querySelector('#chatBody > .view[data-view="settings"]')).not.toBeNull();
   });
 
@@ -163,7 +144,7 @@ describe('the session card header', () => {
 /**
  * The session list is the one surface where rows are near-identical by construction: a
  * resume and its workers are all opened within a minute of each other. Which run a row
- * belongs to, and whether its tab ever opened, are carried by chips — so the chips are
+ * belongs to, and whether its tab ever opened, are carried by chips â€” so the chips are
  * the part that must survive a narrow row, and the counts are the part that yields.
  */
 describe('a session row', () => {
@@ -241,8 +222,8 @@ describe('the session-row chat actions', () => {
 
   /**
    * The Unattributed row is the one row with no chat to block, and it was the one row with no
-   * way to stop what it was showing. The switch that governs it is app-wide by necessity — the
-   * whole point of the row is that the app cannot say which chat these calls came from — so the
+   * way to stop what it was showing. The switch that governs it is app-wide by necessity â€” the
+   * whole point of the row is that the app cannot say which chat these calls came from â€” so the
    * button presses the settings checkbox rather than writing a second copy of that state.
    */
   it('blocks the Unattributed row through the one switch that can answer for it', () => {
@@ -321,7 +302,7 @@ describe('the chat panel cards', () => {
 
 /**
  * A recorded tool call is a `<details>`. A `<details>` whose `display` is changed stops
- * stacking its summary above its body and lays the two out as siblings — which is how the
+ * stacking its summary above its body and lays the two out as siblings â€” which is how the
  * arguments/result panel came to sit beside the row, pinned to the right edge of the card
  * and clipped. A bare `.tool` rule for the permission checkboxes was matching it.
  */
@@ -343,7 +324,7 @@ describe('an expanded tool call', () => {
  * Every recorded event kind has a row.
  *
  * `eventBody` ends in a `default` arm that renders the words "Unknown event", so a kind
- * added to the recorder and not to the renderer does not fail a build or a type check —
+ * added to the recorder and not to the renderer does not fail a build or a type check â€”
  * it ships, and shows the user grey placeholder rows in their own timeline. That is how
  * `agent_message` came to be unrendered: it was added to the union, written by the
  * recorder, and read by nothing in the renderer.
@@ -353,7 +334,7 @@ describe('an expanded tool call', () => {
  */
 describe('the settings sheet', () => {
   /**
-   * Three rows, and each one is a label, a number, a unit and — where it has one — a
+   * Three rows, and each one is a label, a number, a unit and â€” where it has one â€” a
    * switch, side by side. The sheet shipped broken once: `.num` sets the field's width,
    * but the shared `input[type='number']` rule sets `width: 100%`, and a bare class loses
    * that specificity tie. The field stretched across the whole row, squeezed the label to
@@ -368,7 +349,7 @@ describe('the settings sheet', () => {
   /**
    * The pane's column is capped, not content-sized. A grid with no explicit column gets an
    * implicit `auto` track, and an `auto` track is floored by the widest child's min-content
-   * width — which for these rows is the whole of a `white-space: nowrap` hint. Measured in
+   * width â€” which for these rows is the whole of a `white-space: nowrap` hint. Measured in
    * Electron at the window's own 1080px: the track came out 724px inside a 674px content
    * box, so every row overhung by 50px and the card, which clips rather than scrolls
    * sideways, simply ate the switches, the units and the end of "Select model".
@@ -414,36 +395,14 @@ describe('the settings sheet', () => {
     }
   });
 
-  /**
-   * The goal loop controls belong together: the switch, key, model, reasoning and editable
-   * continuation instruction. The key comes
-   * before the picker, because a picker that cannot reach OpenRouter without one is not the
-   * first thing to meet.
-   */
-  it('puts the goal key above the model picker', () => {
-    const pane = document.querySelector('.view[data-view="settings"]')!;
-    const order = [...pane.querySelectorAll('[id^="goal"]')].map((node) => node.id);
-    expect(document.getElementById('goalEnabled')).toBeNull();
-    expect(document.getElementById('chatAutomation')!.closest('#composerSettings')).not.toBeNull();
-    expect(order.indexOf('goalKey')).toBeLessThan(order.indexOf('goalPick'));
-    expect(order.indexOf('goalPick')).toBeLessThan(order.indexOf('goalReasoning'));
-    expect(order.indexOf('goalReasoning')).toBeLessThan(order.indexOf('goalPromptEdit'));
-    // Closed until asked for: the catalogue is several hundred long and costs a round trip.
-    expect(document.getElementById('goalModels')!.hasAttribute('hidden')).toBe(true);
-    expect(document.getElementById('goalPromptPanel')!.hasAttribute('hidden')).toBe(true);
-    expect(document.getElementById('goalPrompt')?.tagName).toBe('TEXTAREA');
-  });
-
-  /** One threshold. Three inputs for the same number is three ways to disagree. */
-  it('asks for a single compaction threshold', () => {
+  it('shows only the surviving numeric settings controls', () => {
     const pane = document.querySelector('.view[data-view="settings"]')!;
     const numbers = [...pane.querySelectorAll('input[type="number"]')].map((input) => input.id);
-    expect(numbers).toEqual(['maWorkers', 'autoCompactTokens']);
+    expect(numbers).toEqual(['maWorkers', 'sessionRetainDays']);
     for (const id of ['sessRecord', 'sessRetain', 'sessAdvisory', 'sessLimit']) {
       expect(document.getElementById(id), `#${id} is back`).toBeNull();
     }
-    expect(document.querySelector('[data-group="recording"]')).toBeNull();
-    expect(pane.textContent).not.toContain('Keep recordings');
+    expect(pane.textContent).toContain('Keep recordings');
   });
 
   /**

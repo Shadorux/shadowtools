@@ -56,7 +56,8 @@ beforeAll(async () => {
   directory = await makeTempDir('clf-final-identity-');
   initConfigPath(directory);
   initSessionStore(directory);
-  await saveConfig(defaultConfig());
+  const config = defaultConfig();
+  await saveConfig({ ...config, sessions: { ...config.sessions, record: true } });
 });
 beforeEach(() => { resetRecorderForTests(); resetSessionStoreForTests(); });
 afterAll(async () => { resetRecorderForTests(); resetSessionStoreForTests(); await removeTempDir(directory); });
