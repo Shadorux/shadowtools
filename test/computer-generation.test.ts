@@ -56,6 +56,13 @@ const fake = vi.hoisted(() => {
       if (request.file) {
         process.getBuiltinModule('node:fs').writeFileSync(request.file, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
       }
+      if (request.captureAfter?.file) {
+        process.getBuiltinModule('node:fs').writeFileSync(request.captureAfter.file, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      }
+      const capture = request.captureAfter ? {
+        region: rect, image: { width: 100, height: 100 }, windowGeometry: rect,
+        displays: [rect], captureMode: 'window', focused: true
+      } : undefined;
       const reply = {
         ok: true, window: request.op === 'find_ui' ? 77 : window, windows: [window], screen: rect,
         region: rect, image: { width: 100, height: 100 }, windowGeometry: rect,
@@ -64,7 +71,10 @@ const fake = vi.hoisted(() => {
         elements: [{ runtimeKey: 'button', name: 'Example', role: 'Button', enabled: true,
           offscreen: false, bounds: { x: 10, y: 10, width: 20, height: 20 } }],
         cursor: { x: 20, y: 20 },
-        routes: (request.actions ?? []).map(() => 'uia')
+        routes: (request.actions ?? []).map(() => 'uia'),
+        ...(request.op === 'framehash' ? { hash: 'before-frame' } : {}),
+        ...(request.detectChangeWindow ? { beforeHash: 'before-frame', afterHash: 'after-frame' } : {}),
+        ...(capture ? { capture } : {})
       };
       if (overrides.focusFailure && request.actions?.some((action: any) => action.type === 'focus')) {
         Object.assign(reply, { ok: false, error_code: 'FOCUS_FAILED', message: 'requested target is not foreground', completed_count: 0, failed_index: 0, routes: [] });
@@ -208,7 +218,18 @@ describe.each(['stdio', 'addon'] as const)('Desktop reply provenance (%s)', (tra
     const native = fake.requests.filter(request => request.op === 'act');
     expect(native).toHaveLength(2);
     expect(native.every(request => request.targetWindow === 77)).toBe(true);
-    expect(fake.requests.at(-1)).toMatchObject({ op: 'capture', id: 77 });
+    expect(fake.requests.at(-1)).toMatchObject({ op: 'act', targetWindow: 77, captureAfter: { id: 77, maxWidth: 320 } });
+    expect(fake.requests.filter(request => request.op === 'capture')).toHaveLength(0);
+  });
+
+  it.runIf(transport === 'stdio')('gets before/action/after visual change evidence in one native request', async () => {
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    const result = await computer.actAndDetectChange([{ type: 'keypress', keys: ['Enter'] }], { window: 77, sample: 12 });
+    expect(result).toMatchObject({ changed: true, beforeHash: 'before-frame', afterHash: 'after-frame' });
+    expect(fake.requests.filter(request => request.op === 'framehash')).toHaveLength(0);
+    expect(fake.requests.filter(request => request.op === 'act')).toEqual([
+      expect.objectContaining({ op: 'act', targetWindow: 77, detectChangeWindow: 77, detectChangeSample: 12 })
+    ]);
   });
 
   it.runIf(transport === 'stdio')('rejects mismatched Windows coordinates, refs and focus before any batch effect', async () => {

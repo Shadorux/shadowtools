@@ -16,8 +16,14 @@ function fixture() {
     getWindowState: vi.fn(async () => result),
     listWindows: vi.fn(async () => ({ windows: [nativeWindow], screen: shot.region })),
     listDesktopApps: vi.fn(async () => ({ apps: [{ id: window.app, displayName: 'Fixture', windows: [nativeWindow] }], truncated: false })),
-    act: vi.fn(async () => ({ cursor: null, clipboard: [], completedCount: 1, routes: ['sendinput' as const] })),
-    actAndCapture: vi.fn(async () => ({ cursor: null, clipboard: [], completedCount: 1, routes: ['sendinput' as const], screenshot: { ...shot, frameId: 9 }, verification: null }))
+    act: vi.fn(async (_actions, opts) => {
+      if (opts?.app !== undefined && opts.app !== result.window.app) throw new Error('STALE_WINDOW: app identity changed');
+      return { cursor: null, clipboard: [], completedCount: 1, routes: ['sendinput' as const] };
+    }),
+    actAndCapture: vi.fn(async (_actions, opts) => {
+      if (opts?.app !== undefined && opts.app !== result.window.app) throw new Error('STALE_WINDOW: app identity changed');
+      return { cursor: null, clipboard: [], completedCount: 1, routes: ['sendinput' as const], screenshot: { ...shot, frameId: 9 }, verification: null };
+    })
   };
   return { backend, result, api: createWindowsComputerApi(backend) };
 }
@@ -180,7 +186,10 @@ describe('Windows Window2 interface', () => {
     await expect(api.click({ window, screenshotId: 'frame-1', x: 5, y: 5 })).rejects.toThrow('STALE_SCREENSHOT');
     result.window = { ...nativeWindow, app: 'other.exe' };
     await expect(api.type_text({ window, text: 'unsafe' })).rejects.toThrow('STALE_WINDOW');
-    expect(backend.act).not.toHaveBeenCalled();
+    expect(backend.act).toHaveBeenCalledExactlyOnceWith(
+      [{ type: 'type', text: 'unsafe' }],
+      { window: 42, app: window.app }
+    );
   });
   it('does not publish an asynchronous observation superseded by another capture', async () => {
     const { api, backend, result } = fixture();
@@ -200,16 +209,17 @@ describe('Windows Window2 interface', () => {
     await expect(other.click({ window, x: 1, y: 1 })).rejects.toThrow('STALE_WINDOW_STATE');
     await expect(other.set_value({ window, element_index: 0, value: 'x' })).rejects.toThrow('STALE_WINDOW_STATE');
   });
-  it('rejects an old unbound action when a newer observation wins its app-identity await', async () => {
-    const { api, backend, result } = fixture();
+  it('does not add a redundant window-state round trip before keyboard, text or activation input', async () => {
+    const { api, backend } = fixture();
     await api.get_window_state({ window });
-    let complete!: (value: typeof result) => void;
-    vi.mocked(backend.getWindowState).mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
-    const keypress = api.press_key({ window, key: 'A' });
-    await api.get_window_state({ window });
-    complete(result);
-    await expect(keypress).rejects.toThrow('observation changed');
-    expect(backend.act).not.toHaveBeenCalled();
+    vi.mocked(backend.getWindowState).mockClear();
+    await api.press_key({ window, key: 'A' });
+    expect(backend.getWindowState).not.toHaveBeenCalled();
+    await api.type_text({ window, text: 'hello' });
+    expect(backend.getWindowState).not.toHaveBeenCalled();
+    await api.activate_window({ window });
+    expect(backend.getWindowState).not.toHaveBeenCalled();
+    expect(backend.act).toHaveBeenCalledTimes(3);
   });
   it('evicts old observation authority at the bounded thirty-two-window limit', async () => {
     const { api, backend, result } = fixture();

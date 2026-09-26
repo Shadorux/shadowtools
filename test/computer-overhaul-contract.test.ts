@@ -31,6 +31,7 @@ describe('desktop helper overhaul contract', () => {
     expect(HELPER_SCRIPT).toContain('public static class CursorGlow');
     expect(HELPER_SCRIPT).toContain('CursorGlow.ShowAt(x, y, false)');
     expect(HELPER_SCRIPT).toContain('double eased = t * t * (3.0 - 2.0 * t)');
+    expect(HELPER_SCRIPT).toContain('Math.Min(95, Math.Max(35');
     expect(HELPER_SCRIPT).toContain('public static void MoveVisible(int x, int y)');
     expect(HELPER_SCRIPT).toContain("'click'        { [Clf]::ClickVisible");
     expect(HELPER_SCRIPT).not.toContain('SetSystemCursor');
@@ -46,5 +47,13 @@ describe('desktop helper overhaul contract', () => {
     expect(HELPER_SCRIPT).toContain('public static string FrameHash(');
     expect(HELPER_SCRIPT).toContain("'framehash'");
     expect(HELPER_SCRIPT).toContain('$result.hash = [Clf]::FrameHash');
+    expect(HELPER_SCRIPT).toContain('$result.beforeHash = [Clf]::FrameHash');
+    expect(HELPER_SCRIPT).toContain('$result.afterHash = [Clf]::FrameHash');
+  });
+
+  it('can capture the immediate result inside the native action request', () => {
+    expect(HELPER_SCRIPT).toContain('$request.captureAfter');
+    expect(HELPER_SCRIPT).toContain('$result.capture = Capture-Target $request.captureAfter $null');
+    expect(HELPER_SCRIPT).toContain("error_code = 'CAPTURE_AFTER_FAILED'");
   });
 });

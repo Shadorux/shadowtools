@@ -157,8 +157,9 @@ export interface ActionResult {
   clipboard: string[];
   completedCount: number;
   routes: ActionRoute[];
-  /** Present only when the caller supplied a visual fingerprint to compare after input. */
+  /** Present only when the caller requested native before/after visual fingerprints. */
   changed?: boolean | null;
+  beforeHash?: string | null;
   afterHash?: string | null;
 }
 
@@ -299,7 +300,7 @@ export function helperTimeoutMs(
     case 'act':
       if (platform !== 'darwin') {
         const actions = Array.isArray(request['actions']) ? request['actions'].slice(0, 20) : [];
-        return 15_000 + actions.reduce((duration, action) => duration + (action?.type === 'drag'
+        return 15_000 + (request['captureAfter'] ? 10_000 : 0) + actions.reduce((duration, action) => duration + (action?.type === 'drag'
           ? Math.min(2000, Math.max(50, Number(action.durationMs) || 350)) : 0), 0);
       }
       // Every macOS physical mutation can now re-prove the exact AX/WindowServer input
@@ -1482,7 +1483,33 @@ export async function actAndCapture(
         );
       }
     }
-    const result = await actLocked(actions, opts);
+    const nativeCaptureWindow = opts.capture?.window ?? opts.window;
+    const canFuseNativeCapture = process.platform === 'win32' && !!opts.capture && !opts.verify &&
+      nativeCaptureWindow !== undefined && opts.capture.full !== true && opts.capture.crop === undefined &&
+      opts.capture.preferActiveWindow !== true &&
+      actions.length > 0 && !['paste', 'read_clipboard', 'write_clipboard', 'wait'].includes(actions.at(-1)!.type) &&
+      actions.every(action => !['paste', 'read_clipboard', 'write_clipboard'].includes(action.type));
+    let fusedDir: string | null = null;
+    let fusedFile: string | null = null;
+    let captureBox: { request: Record<string, unknown>; reply?: Record<string, any> } | undefined;
+    if (canFuseNativeCapture) {
+      fusedDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clf-shot-'));
+      fusedFile = path.join(fusedDir, 'screen.png');
+      captureBox = {
+        request: {
+          file: fusedFile,
+          id: nativeCaptureWindow,
+          maxWidth: Math.min(MAX_SCREENSHOT_WIDTH, Math.max(320, Math.floor(opts.capture?.maxWidth ?? DEFAULT_SCREENSHOT_WIDTH)))
+        }
+      };
+    }
+    let result: ActionResult;
+    try {
+      result = await actLocked(actions, { ...opts, ...(captureBox ? { captureAfter: captureBox } : {}) });
+    } catch (err) {
+      if (fusedDir) await fs.rm(fusedDir, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
     let verification: VerificationResult | null = null;
     if (opts.verify) {
       try {
@@ -1496,6 +1523,24 @@ export async function actAndCapture(
       }
     }
     if (!opts.capture) return { ...result, screenshot: null, verification };
+
+    if (captureBox && fusedDir && fusedFile) {
+      try {
+        const reply = captureBox.reply;
+        if (!reply) {
+          throw new ComputerError('CAPTURE_AFTER_FAILED: input completed but the desktop helper returned no fused capture. Observe again; do not repeat completed actions.');
+        }
+        return { ...result, screenshot: await screenshotFromReply(reply, fusedFile, nativeCaptureWindow ?? null), verification };
+      } catch (err) {
+        if (err instanceof ComputerError && /CAPTURE_AFTER_FAILED/.test(err.message)) throw err;
+        throw new ComputerError(
+          `CAPTURE_AFTER_FAILED: completed_count=${result.completedCount}. ${err instanceof Error ? err.message : String(err)}. Observe again; do not repeat completed actions.`,
+          { completedCount: result.completedCount, failedIndex: result.completedCount, completedRoutes: result.routes }
+        );
+      } finally {
+        await fs.rm(fusedDir, { recursive: true, force: true }).catch(() => {});
+      }
+    }
 
     try {
       const { preferActiveWindow, ...capture } = opts.capture;
@@ -1520,12 +1565,12 @@ export async function actAndDetectChange(
   opts: { window: number; frameId?: number; app?: string; ownerWindow?: number; ownerApp?: string; sample?: number }
 ): Promise<ActionResult & { changed: boolean; beforeHash: string; afterHash: string }> {
   return exclusive(async () => {
-    const beforeHash = await windowFrameHashLocked(opts.window, opts.sample);
-    // Ask the same native action request for the post-action fingerprint. This avoids a
-    // second helper round trip while preserving the exclusive ownership fence.
-    const result = await actLocked(actions, { ...opts, detectChangeHash: beforeHash, detectChangeSample: opts.sample });
+    const result = await actLocked(actions, { ...opts, detectChangeWindow: opts.window, detectChangeSample: opts.sample });
+    const beforeHash = result.beforeHash;
     const afterHash = result.afterHash;
-    if (typeof afterHash !== 'string') throw new ComputerError('The desktop helper returned no post-action frame hash.');
+    if (typeof beforeHash !== 'string' || typeof afterHash !== 'string') {
+      throw new ComputerError('The desktop helper returned no before/after frame hash.');
+    }
     return { ...result, changed: beforeHash !== afterHash, beforeHash, afterHash };
   });
 }
@@ -1606,7 +1651,8 @@ async function verifyDesktopLocked(spec: VerificationSpec): Promise<Verification
 
 async function actLocked(
   actions: Action[],
-  opts: { frameId?: number; window?: number; ownerWindow?: number; app?: string; ownerApp?: string; detectChangeHash?: string; detectChangeSample?: number }
+  opts: { frameId?: number; window?: number; ownerWindow?: number; app?: string; ownerApp?: string; detectChangeWindow?: number; detectChangeSample?: number;
+    captureAfter?: { request: Record<string, unknown>; reply?: Record<string, any> } }
 ): Promise<ActionResult> {
   if (process.platform !== 'win32' && actions.some(action => action.type === 'paste' || action.type === 'launch_app' || action.type === 'ui_action')) {
     throw new ComputerError('ACTION_UNSUPPORTED: paste, launch_app and ui_action are currently Windows only.');
@@ -1802,7 +1848,7 @@ async function actLocked(
   let batchIndices: number[] = [];
   let reply: Record<string, any> | null = null;
   let helperUsed = false;
-  const flush = async (): Promise<void> => {
+  const flush = async (final = false): Promise<void> => {
     if (batch.length === 0) return;
     const sending = batch;
     const sendingIndices = batchIndices;
@@ -1812,8 +1858,9 @@ async function actLocked(
       reply = await runHelper({
         op: 'act',
         actions: sending,
-        ...(opts.detectChangeHash === undefined || opts.window === undefined ? {} : {
-          detectChangeWindow: opts.window,
+        ...(final && opts.captureAfter ? { captureAfter: opts.captureAfter.request } : {}),
+        ...(opts.detectChangeWindow === undefined ? {} : {
+          detectChangeWindow: opts.detectChangeWindow,
           detectChangeSample: Math.min(32, Math.max(8, Math.floor(opts.detectChangeSample ?? 16)))
         }),
         ...(opts.window === undefined ? {} : { targetWindow: opts.window }),
@@ -1836,6 +1883,17 @@ async function actLocked(
             }
           : {})
       }, expected);
+      if (final && opts.captureAfter) {
+        const capture = reply['capture'];
+        if (!capture || typeof capture !== 'object' || Array.isArray(capture)) {
+          throw new ComputerError('CAPTURE_AFTER_FAILED: input completed but the desktop helper returned no capture.', {
+            completedCount: sending.length,
+            failedIndex: sending.length,
+            completedRoutes: Array.isArray(reply['routes']) ? reply['routes'].map(String) as ActionRoute[] : []
+          });
+        }
+        opts.captureAfter.reply = stampHelperReply(capture as Record<string, any>, generationOfReply(reply));
+      }
       helperUsed = true;
       const helperRoutes = Array.isArray(reply['routes']) ? reply['routes'].map(String) : [];
       for (let index = 0; index < sending.length; index++) {
@@ -1944,7 +2002,7 @@ async function actLocked(
   // when the desktop helper is unavailable. Mixed desktop batches still take one final cursor
   // sample after any trailing local wait/clipboard work so the pointer report remains current.
   if (batch.length > 0) {
-    await flush();
+    await flush(true);
   } else if (helperUsed) {
     reply = await runHelper({ op: 'cursor' });
   }
@@ -1974,8 +2032,8 @@ async function actLocked(
     clipboard,
     completedCount,
     routes,
-    ...(opts.detectChangeHash === undefined ? {} : {
-      changed: typeof reply['afterHash'] === 'string' ? reply['afterHash'] !== opts.detectChangeHash : null,
+    ...(opts.detectChangeWindow === undefined ? {} : {
+      beforeHash: typeof reply['beforeHash'] === 'string' ? reply['beforeHash'] : null,
       afterHash: typeof reply['afterHash'] === 'string' ? reply['afterHash'] : null
     })
   };

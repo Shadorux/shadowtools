@@ -151,8 +151,8 @@ public static class Clf {
     double dx = x - (double)start.X, dy = y - (double)start.Y;
     double distance = Math.Sqrt(dx * dx + dy * dy);
     if (distance < 4) { MoveImmediate(x, y); CursorGlow.ShowAt(x, y, false); return; }
-    int durationMs = Math.Min(180, Math.Max(70, (int)Math.Round(70 + distance / 12.0)));
-    int steps = Math.Min(18, Math.Max(5, (int)Math.Ceiling(durationMs / 12.0)));
+    int durationMs = Math.Min(95, Math.Max(35, (int)Math.Round(35 + distance / 24.0)));
+    int steps = Math.Min(10, Math.Max(3, (int)Math.Ceiling(durationMs / 10.0)));
     var clock = System.Diagnostics.Stopwatch.StartNew();
     for (int step = 1; step <= steps; step++) {
       double t = step / (double)steps;
@@ -163,7 +163,7 @@ public static class Clf {
       MoveImmediate(px, py);
       CursorGlow.ShowAt(px, py, false);
       int remaining = (int)Math.Ceiling((double)durationMs * step / steps - clock.ElapsedMilliseconds);
-      if (remaining > 0) Thread.Sleep(Math.Min(12, remaining));
+      if (remaining > 0) Thread.Sleep(Math.Min(10, remaining));
     }
   }
 
@@ -1420,6 +1420,13 @@ function Handle-Request($request) {
           throw 'BAD_ACTION: drag duration must be an integer between 50 and 2000 milliseconds'
         }
       }
+      if ($request.detectChangeWindow) {
+        [CursorGlow]::HideForCapture()
+        $hashWindow = Get-WindowRow ([int64]$request.detectChangeWindow)
+        if ($null -eq $hashWindow) { throw "WINDOW_NOT_FOUND: no matching visible window is available" }
+        $sample = if ($request.detectChangeSample) { [int]$request.detectChangeSample } else { 16 }
+        $result.beforeHash = [Clf]::FrameHash([int]$hashWindow.x, [int]$hashWindow.y, [int]$hashWindow.width, [int]$hashWindow.height, $sample)
+      }
       $routes = @()
       $launches = @()
       $completed = 0
@@ -1479,6 +1486,22 @@ function Handle-Request($request) {
             message = $message
             completed_count = $completed
             failed_index = $index
+            routes = @($routes)
+            launches = @($launches)
+          }
+        }
+      }
+      if ($request.captureAfter) {
+        try {
+          $result.capture = Capture-Target $request.captureAfter $null
+        } catch {
+          $message = $_.Exception.GetBaseException().Message
+          return @{
+            ok = $false
+            error_code = 'CAPTURE_AFTER_FAILED'
+            message = ($message + '. Observe again; do not repeat completed actions.')
+            completed_count = $completed
+            failed_index = $completed
             routes = @($routes)
             launches = @($launches)
           }
