@@ -858,47 +858,6 @@ describe('accepted helper tab cleanup', () => {
   }
 });
 
-describe('automatic Continue shares scheduled reload custody', () => {
-  it.each(['accepted', 'draft', 'navigated', 'rejected'] as const)('never reloads immediately after Stop (%s)', async outcome => {
-    const chat = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-    let url = `https://chatgpt.com/c/${chat}`;
-    const actions: string[] = [];
-    let consumed = false;
-    const worker = loadWorker({
-      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session: new FakeStorageArea(),
-      tabsGet: async () => ({ id: 1, url }),
-      tabsSendMessage: async (_id, message) => {
-        if (message.type === 'clf-recovery-reload-check') return { safe: outcome !== 'draft' };
-        return { ok: true };
-      },
-      fetch: async (address, init) => {
-        const route = new URL(address).pathname;
-        if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
-        if (route === '/input/claim') {
-          const body = JSON.parse(String(init?.body)); actions.push(body.recoveryAction);
-          if (body.recoveryAction === 'stopped') {
-            if (outcome === 'navigated') url = 'https://chatgpt.com/';
-            const allowed = !consumed && outcome !== 'rejected'; consumed = true;
-            return response(200, { ok: allowed });
-          }
-          return response(200, { ok: true });
-        }
-        return response(200, {});
-      }
-    });
-    await worker.registerTab(1);
-    const message = { type: 'desktop_input', id: 'ffffffff-1111-4222-8333-444444444444',
-      owner: '1:document-1-0:0', conversationId: chat, recoveryAction: 'stopped' };
-    await worker.send(message);
-    expect(worker.tabsReload).not.toHaveBeenCalled();
-    expect(actions.includes('reloaded')).toBe(false);
-    if (outcome === 'accepted') {
-      await worker.send(message);
-      expect(worker.tabsReload).not.toHaveBeenCalled();
-    }
-  });
-});
-
 /**
  * Exact chat recovery, from the browser's side.
  *

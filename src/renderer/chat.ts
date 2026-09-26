@@ -2872,9 +2872,9 @@ function scheduleReload(): void {
   }, 400);
 }
 
-/** Retired automatic drafts belong to their creation time, never the live composer queue. */
+/** Retired legacy automatic drafts belong to their creation time, never the live composer queue. */
 function historicalAutomaticInput(entry: InputEntry): boolean {
-  return !!entry.recovery && entry.state === 'cancelled' && !!entry.error;
+  return entry.state === 'cancelled' && entry.error?.startsWith('Retired automatic Continue') === true;
 }
 
 function inputMessageRow(entry: InputEntry, notice: boolean): HTMLElement {
@@ -3030,7 +3030,7 @@ async function refreshInputQueue(): Promise<void> {
   const queueSession = selectedId;
   const reorder = async (from: string, to: string, after: boolean) => {
     if (!queueSession || selectedId !== queueSession) return;
-    const ids = queuedTasks.filter(row => row.state === 'queued' && !row.recovery).map(row => row.id);
+    const ids = queuedTasks.filter(row => row.state === 'queued').map(row => row.id);
     if (from === to || !ids.includes(from) || !ids.includes(to)) return;
     ids.splice(ids.indexOf(from), 1);
     ids.splice(ids.indexOf(to) + Number(after), 0, from);
@@ -3047,16 +3047,13 @@ async function refreshInputQueue(): Promise<void> {
     if (entry.state === 'queued' && existing?.classList.contains('is-editing')) return existing;
     const card = el('div', 'queued-input'); card.dataset.inputId = entry.id;
     if (projectedIds.has(entry.id)) ui(card, 'aria-label', () => t("Plan stage · waiting for the first message to be sent"));
-    if (entry.recovery) ui(card, 'aria-label', () => t('Automatic Continue'));
-    const label = el('span', 'queue-label', entry.recovery ? () => `${t('Automatic Continue')} · ${entry.text}` : entry.text);
-    ui(label, 'title', () => `${entry.recovery
-      ? t('Resumes without a final answer. If ChatGPT is still generating, the silent turn is stopped before Continue is sent.')
-      : entry.state === 'queued' ? (entry.mode === 'after-turn' ? t("After the next completed answer") : t("At Session finish or after a completed answer")) : t("Awaiting receipt")} · ${entry.text}`);
+    const label = el('span', 'queue-label', entry.text);
+    ui(label, 'title', () => `${entry.state === 'queued' ? (entry.mode === 'after-turn' ? t("After the next completed answer") : t("At Session finish or after a completed answer")) : t("Awaiting receipt")} · ${entry.text}`);
     label.dir = 'auto';
-    card.append(icon(entry.recovery ? 'i-pulse' : 'i-clock'), label);
+    card.append(icon('i-clock'), label);
     if (entry.state === 'queued') {
       const retireCard = () => { card.remove(); taskList.hidden = taskList.childElementCount === 0; };
-      const cancel = dockAction(() => entry.recovery ? t('Cancel automatic Continue') : t("Remove queued task"), 'i-trash', () => {});
+      const cancel = dockAction(() => t("Remove queued task"), 'i-trash', () => {});
       cancel.onclick = async () => {
         if (cancel.disabled || !card.isConnected || selection !== selectionGeneration) return;
         cancel.disabled = true;
@@ -3069,7 +3066,6 @@ async function refreshInputQueue(): Promise<void> {
           void refreshInputQueue();
         } else cancel.disabled = false;
       };
-      if (entry.recovery) { card.append(cancel); return card; }
       const queueSessionSummary = sessions.find(row => row.id === selectedId);
       const modelSelection = queueSessionSummary?.selectedModel;
       if (entry.mode === 'finish' && modelSelection?.conversationId === queueSessionSummary?.conversationId && isAstraModel(modelSelection?.model, modelSelection?.reasoningEffort)) {
@@ -3108,7 +3104,7 @@ async function refreshInputQueue(): Promise<void> {
       label.onkeydown = event => {
         if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
         event.preventDefault();
-        const ids = queuedTasks.filter(row => row.state === 'queued' && !row.recovery).map(row => row.id);
+        const ids = queuedTasks.filter(row => row.state === 'queued').map(row => row.id);
         const next = ids[ids.indexOf(entry.id) + (event.key === 'ArrowDown' ? 1 : -1)];
         if (next) void reorder(entry.id, next, event.key === 'ArrowDown');
       };

@@ -61,7 +61,6 @@ import {
   companionDiagnostics,
   sessionActivityExpiresAt,
   sessionInputActivity,
-  recoveryInputAllowed,
   sessionControlsFor, stopSessionTurn, compactSession, cancelSessionCompaction,
   cancelWorkerCommands,
   chatUrl,
@@ -141,7 +140,6 @@ const settingsPatch = z.object({
   }),
   ui: z.object({
     appearance: appearanceSchema.optional(),
-    autoContinue: z.boolean().optional(),
     chatBrowser: z.enum(CHAT_BROWSERS).optional(),
     developerMode: z.boolean().optional(),
     finishTool: z.boolean().optional(),
@@ -226,7 +224,6 @@ function mergeSettings(current: Config, base: SettingsSnapshot, wanted: Settings
     },
     ui: {
       appearance: mergeAppearance(current.ui.appearance, base.ui.appearance, wanted.ui.appearance),
-      autoContinue: pick(current.ui.autoContinue, base.ui.autoContinue, wanted.ui.autoContinue),
       chatBrowser: pick(current.ui.chatBrowser, base.ui.chatBrowser, wanted.ui.chatBrowser),
       developerMode: pick(current.ui.developerMode, base.ui.developerMode, wanted.ui.developerMode),
       finishTool: pick(current.ui.finishTool, base.ui.finishTool, wanted.ui.finishTool),
@@ -1024,7 +1021,6 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     target.webContents.send(channel, ...args);
   };
   configureInputDelivery({
-    recoveryAllowed: recoveryInputAllowed,
     activity: sessionInputActivity,
     wakeDecision: async (entry, signal) => {
       signal.throwIfAborted();
@@ -1038,8 +1034,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     recordDelivered: (entry, anchorCommitted) => getConfig().sessions.record ? recordDeliveredInput(entry, anchorCommitted) : Promise.resolve(true),
     prepareText: async (entry, limits, authored) => {
       const text = entry.text;
-      // Only the opening user input owns executor setup. Existing chats, queued
-      // checkpoints and automatic continuations already have their instructions.
+      // Only the opening user input owns executor setup. Existing chats and queued
+      // checkpoints already have their instructions.
       return (entry.opening || !entry.sessionId) && !entry.conversationId && entry.mode !== 'finish'
         ? prepareSessionPrompt(text, entry, limits, authored)
         : entry.purpose !== 'decision' ? prepareSkillFollowup(text, authored, limits, entry) : text;

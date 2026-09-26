@@ -485,8 +485,6 @@ function save(over: { readOnly?: boolean; theme?: 'light' | 'dark'; appearance?:
       planReasoning: $<HTMLSelectElement>('planReasoning').value as AppState['config']['ui']['planReasoning'],
       finishLeadMinutes: Number($<HTMLSelectElement>('finishLeadMinutes').value),
       backgroundChats: $<HTMLInputElement>('backgroundChats').checked,
-      // Automatic continuation has no UI in ShadowTools and stays retired.
-      autoContinue: false,
       browserOnly: $<HTMLInputElement>('browserOnly').checked,
       autoRefreshPlugins: $<HTMLInputElement>('autoRefreshPlugins').checked,
       autoConnect: $<HTMLInputElement>('autoConnect').checked,

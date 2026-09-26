@@ -492,37 +492,6 @@ it('shows ordinary after-turn messages in the task dock until actual delivery', 
   expect(w.document.getElementById('timeline')!.textContent).toContain('Next task');
 });
 
-it('identifies automatic Continue without user-task editing or reordering and keeps its cancellation', async () => {
-  const { w, live, append } = await boot([]);
-  const sessionId = summary([]).id;
-  const recovery: InputEntry = { id: 'automatic-continue', sessionId, text: 'Resume the unfinished work.', mode: 'after-turn',
-    dueAt: 0, model: null, reasoningEffort: null, state: 'queued', owner: null, createdAt: 0, conversationId: 'chat-b',
-    recovery: { questionId: 'source-question', pro: false, busyUntil: Date.now() + 60_000, phase: 'ready' } };
-  live.inputs.push(recovery, ...['first', 'second'].map((text, index): InputEntry => ({
-    id: `authored-${index}`, sessionId, text, mode: 'after-turn', dueAt: 0, model: null, reasoningEffort: null,
-    state: 'queued', owner: null, createdAt: index + 1, conversationId: 'chat-b'
-  })));
-  const api = (w as any).api;
-  api.reorderQueuedInputs = vi.fn(async () => ({ ok: true, data: true }));
-  await append([]);
-  const card = w.document.querySelector<HTMLElement>('#finishQueue [data-input-id="automatic-continue"]')!;
-  expect(card.textContent).toContain('Automatic Continue');
-  expect(card.textContent).toContain(recovery.text);
-  expect(card.querySelector<HTMLElement>('.queue-label')!.title).toContain('without a final answer');
-  expect(card.querySelector('[aria-label="Edit queued task"]')).toBeNull();
-  expect(card.querySelector('[draggable="true"]')).toBeNull();
-  const second = w.document.querySelector('#finishQueue [data-input-id="authored-1"] .queue-label')!;
-  second.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }));
-  await settle();
-  expect(api.reorderQueuedInputs).toHaveBeenCalledWith(sessionId, ['authored-1', 'authored-0']);
-  w.document.querySelector<HTMLButtonElement>('#finishQueue [aria-label="Cancel automatic Continue"]')!.click();
-  await settle();
-  expect(api.cancelInput).toHaveBeenCalledWith(recovery.id);
-  expect(live.inputs[0]!.state).toBe('cancelled');
-  expect(w.document.querySelector('#finishQueue [data-input-id="automatic-continue"]')).toBeNull();
-  expect(w.document.querySelectorAll('#finishQueue [aria-label="Edit queued task"]')).toHaveLength(2);
-});
-
 it('keeps a transport-deferred immediate upload visible with cancellation instead of an invalid task editor', async () => {
   const { w, live, append } = await boot([]);
   live.inputs.push({ id: 'native-correction', sessionId: summary([]).id, text: 'Waiting upload', mode: 'after-turn', requestedMode: 'auto',
@@ -539,7 +508,7 @@ it('keeps a transport-deferred immediate upload visible with cancellation instea
   expect(w.document.querySelector('[data-input-id="native-correction"]')).toBeNull();
 });
 
-it('keeps cancelled Continue attempts at their own times across a long session instead of stacking them under the current chat', async () => {
+it('keeps migrated retired Continue receipts at their own times instead of stacking them under the current chat', async () => {
   const rows: SessionEvent[] = [0, 1, 2, 3].map(index => ({
     seq: index + 1, time: T0 + index * 60_000, source: 'extension', kind: 'user_message',
     messageId: `night-question-${index}`, message: text(`NIGHT QUESTION ${index}`)
@@ -549,8 +518,7 @@ it('keeps cancelled Continue attempts at their own times across a long session i
     id: `retired-continue-${index}`, sessionId: summary(rows).id, text: `UNSENT CONTINUE ${index}`,
     mode: 'after-turn', dueAt: T0 + index * 60_000 + 1000, createdAt: T0 + index * 60_000 + 1000,
     model: null, reasoningEffort: null, state: 'cancelled', owner: null, conversationId: `old-chat-${index}`,
-    error: 'Automatic Continue cancelled: the source turn, activity or setting changed.',
-    recovery: { questionId: `night-question-${index}`, pro: false, busyUntil: T0 + index * 60_000 + 61_000, phase: 'ready' }
+    error: 'Retired automatic Continue was cancelled during migration.'
   });
   await append([]);
   expect(w.document.getElementById('inputQueue')!.textContent).not.toContain('UNSENT CONTINUE');

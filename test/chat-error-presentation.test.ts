@@ -58,7 +58,7 @@ it('distinguishes a failed view and app silence from actual native generation', 
   const thinking = chatErrorPresentation(error('Thinking failed'));
   expect(thinking.title).toBe('Thinking failed');
   expect(thinking.next).toContain('You can send a follow-up');
-  expect(thinking.next).toContain('five minutes');
+  expect(thinking.next).toContain('will not send another message for you');
   const stalled = chatErrorPresentation(error('No visible progress for ten minutes. The turn is still marked as generating.'));
   expect(stalled.title).toBe('Response stalled');
   expect(stalled.message).toContain('could not confirm');

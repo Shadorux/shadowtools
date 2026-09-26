@@ -335,8 +335,7 @@ beforeAll(async () => {
   suiteConfig = {
     ...baseConfig,
     sessions: { ...baseConfig.sessions, record: true },
-    // Isolate legacy tab/Goal recovery; automatic Continue is covered by input integration.
-    ui: { ...baseConfig.ui, autoContinue: false },
+    ui: { ...baseConfig.ui },
     multiAgent: { ...baseConfig.multiAgent, enabled: true, recoverAgentTabs: true }
   };
   await saveConfig(suiteConfig);
@@ -6931,7 +6930,6 @@ describe('unattributed activity recovery', () => {
 
   it.each(['normal', 'pro'] as const)('keeps the %s silence countdown and reload valid across same-turn corrections', async model => {
     const previous = getConfig();
-    await saveConfig({ ...previous, ui: { ...previous.ui, autoContinue: true } });
     vi.useFakeTimers();
     try {
       await pair();
@@ -6973,7 +6971,6 @@ describe('unattributed activity recovery', () => {
 
   it.each(['new-question', 'foreign-correction', 'stopped'] as const)('retires silence recovery at a %s boundary instead of repeatedly queuing it', async boundary => {
     const previous = getConfig();
-    await saveConfig({ ...previous, ui: { ...previous.ui, autoContinue: true } });
     vi.useFakeTimers();
     try {
       await pair();
@@ -7043,7 +7040,7 @@ describe('unattributed activity recovery', () => {
 
   it.each([false, true])('projects an exactly owned running call after page departure (manual=%s)', async manual => {
     const previous = getConfig();
-    await saveConfig({ ...previous, ui: { ...previous.ui, autoContinue: false },
+    await saveConfig({ ...previous,
       multiAgent: { ...previous.multiAgent, recoverAgentTabs: false } });
     vi.useFakeTimers();
     try {

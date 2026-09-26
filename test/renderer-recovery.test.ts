@@ -79,10 +79,11 @@ it('promises an attribution retry only when main reports the original retry auth
   expect(host.textContent).toContain('Reload in 4:00');
 });
 
-it.each([60_000, 300_000])('explains the remaining %i ms generating deferral', deadline => {
-  renderRecoveryCountdowns(host, [{ kind: 'native-busy', deadline, next: 'continue' }], 0);
+it.each([60_000, 300_000])('explains the remaining %i ms queued-message deferral', deadline => {
+  renderRecoveryCountdowns(host, [{ kind: 'native-busy', deadline, next: 'queue' }], 0);
   expect(host.textContent).toContain('Turn still marked generating · extra wait');
-  expect(host.textContent).toContain(`Continue in ${deadline / 60_000}:00`);
+  expect(host.textContent).toContain('next: Queued message');
+  expect(host.textContent).toContain(`Check in ${deadline / 60_000}:00`);
   renderRecoveryCountdowns(host, [{ kind: 'post-reload', deadline, next: 'queue', generating: true }], 0);
   expect(host.textContent).toContain('Reloaded · turn still marked generating');
   expect(host.querySelector('.recovery-notice')?.getAttribute('title')).toContain('not a new reload timer');
@@ -117,20 +118,10 @@ it('names a queued message as the next step without claiming it was sent', () =>
   expect(host.textContent).toContain('Check in 1:00');
 });
 
-it('projects the conditional Continue deadline and never claims delivery at zero', () => {
-  const countdown = { kind: 'native-busy' as const, next: 'continue' as const, deadline: 60_000 };
+it('shows the existing queued-message pickup deadline after the native busy wait', () => {
+  const countdown = { kind: 'pickup' as const, next: 'queue' as const, deadline: 120_000 };
   renderRecoveryCountdowns(host, [countdown], 0);
-  expect(host.textContent).toContain('Automatic Continue');
-  expect(host.textContent).toContain('Continue in 1:00');
-  renderRecoveryCountdowns(host, [countdown], 60_000);
-  expect(host.textContent).toContain('Preparing Continue…');
-  expect(host.textContent).not.toContain('sent');
-});
-
-it('shows the existing ticket pickup deadline after the native busy wait', () => {
-  const countdown = { kind: 'pickup' as const, next: 'continue' as const, deadline: 120_000 };
-  renderRecoveryCountdowns(host, [countdown], 0);
-  expect(host.textContent).toContain('Waiting for delivery · next: Automatic Continue');
+  expect(host.textContent).toContain('Waiting for delivery · next: Queued message');
   expect(host.textContent).toContain('Reload in 2:00');
   renderRecoveryCountdowns(host, [countdown], 120_000);
   expect(host.textContent).toContain('Reload pending…');

@@ -569,7 +569,6 @@
   }
   let stallReported = false;
   let userStopped = false;
-  let recoveryStopping = false;
   /**
    * Final public ChatGPT message that already terminalised the local turn while the page's
    * Stop control was still mounted. A stale Stop must not reopen the same finished turn on
@@ -1729,7 +1728,6 @@
    */
   function endOutcome(turn, nativeFinal = false) {
     if (userStopped) return { outcome: 'stopped' };
-    if (recoveryStopping && !nativeFinal) return { outcome: 'interrupted', detail: 'Automatic Continue stopped an unchanged silent turn.' };
     // Only this turn's failures. An error inside another turn's section is that turn's,
     // and a toast still on screen from an earlier failure was already on screen when this
     // turn began — neither says anything about how this one ended.
@@ -8496,7 +8494,7 @@
   const noteStopClick = (event) => {
     const stop = CLF_DOM.stopButton();
     if (!stop || !(event.target instanceof Node) || !stop.contains(event.target) ||
-        (recoveryStopping && !event.isTrusted) || userStopped) return;
+        userStopped) return;
     userStopped = true;
     // Publish the user's exact stop intent in the existing journal immediately.
     // Waiting for Stop to disappear loses it when the document closes first.
@@ -8766,32 +8764,6 @@
       (recordedFinal || fiberTerminalMessageId === terminal) && fiberTurnFor(currentAssistantTurn())?.endMessageId === terminal);
   }
 
-  /** Unfinished Continue work settles through the same native control. */
-  async function stopAutomationGeneration(safe) {
-    if (!safe()) return false;
-    recoveryStopping = true;
-    try {
-      if (CLF_DOM.generating() && !CLF_DOM.stopGeneration(safe)) return false;
-      return Boolean(await waitPageView(() => !CLF_DOM.generating(), safe, INTERRUPT_WAIT_MS) && safe());
-    } finally { recoveryStopping = false; }
-  }
-
-  // Continue may arrive before the browser journal's final reaches the app. Check the
-  // exact latest native answer locally as well, even when the composer already says Send.
-  async function recoveryPageUnfinished(safe) {
-    if (!safe()) return false;
-    const latest = CLF_DOM.turns().at(-1);
-    if (latest?.role === 'assistant') {
-      if (!await refreshFiber({ pageTurnId: latest.id, pageTurn: latest.node || latest.nodes?.[0] }) || !safe()) return false;
-      const current = CLF_DOM.turns().at(-1);
-      const native = current?.role === 'assistant' ? fiberTurnFor(current) : null;
-      if (!native) return false;
-      // A known native final vetoes Continue even while delivery to the app is pending.
-      if (native?.endMessageId) { await flush(); return false; }
-    }
-    return Boolean(await flush() && safe());
-  }
-
   async function inspectRepairPage(message) {
     const target = conversationId, forEpoch = epoch;
     const current = () => alive && target === message.conversationId && conversationId === target &&
@@ -8829,49 +8801,15 @@
     const sourceUser = CLF_DOM.messages().filter(row => row.role === 'user').at(-1)?.id;
     let sendAttempted = false;
     const onTarget = () => alive && epoch === forEpoch && CLF_DOM.conversationId() === target &&
-      (!message.recovery || sendAttempted || !userStopped) &&
       (!sourceQuiet || sendAttempted || (turnProgressRevision === sourceActivity && turnId === sourceTurn &&
         CLF_DOM.messages().filter(row => row.role === 'user').at(-1)?.id === sourceUser)) &&
       (!message.directTurn || sendAttempted || (CLF_DOM.messages().filter(row => row.role === 'user').at(-1)?.id === sourceUser &&
         (!turnId || turnId === sourceTurn)));
     if (!onTarget()) return false;
-    if (message.recovery && (!sourceUser || sourceUser !== message.recovery.questionId || userStopped)) return false;
-    if (message.recovery && !await recoveryPageUnfinished(onTarget)) return false;
     if (silencePickup && CLF_DOM.generating() && !await confirmedProviderTerminal()) {
       if (!onTarget()) return false;
-      if (message.recovery?.stop === true) {
-        desktopInputBusy = true;
-        let input = null;
-        try {
-          const safe = () => onTarget() && !userStopped && pendingTools === 0 &&
-            CLF_DOM.composerVisible() && !(CLF_DOM.composer()?.textContent || '').trim() &&
-            !CLF_DOM.hasComposerAttachments() && !CLF_DOM.errors().some(error => error.blocking === true);
-          if (!safe()) return false;
-          // Flush newly visible native progress before requesting destructive
-          // authority. The captured revision also fences changes during the claim.
-          const sourcePage = currentAssistantTurn();
-          if (sourcePage) await refreshFiber({ pageTurnId: sourcePage.id, pageTurn: sourcePage.node || sourcePage.nodes?.[0] });
-          await flush();
-          if (!safe()) return false;
-          const claim = await ask({ type: 'desktop_input', id: message.id, conversationId: target, requiresAuthorization: true });
-          input = claim?.data?.input;
-          if (!input?.recovery || !safe()) return false;
-          const permit = await ask({ type: 'desktop_input', id: input.id, owner: input.owner, conversationId: target, recoveryAction: 'stop' });
-          if (permit?.data?.ok !== true || !safe() || !await recoveryPageUnfinished(safe) || !safe()) return false;
-          if (!await stopAutomationGeneration(safe)) return false;
-          if (generating) finishGeneration(currentAssistantTurn(), { outcome: 'interrupted', detail: 'Automatic Continue stopped an unchanged silent turn.' }, false);
-          await flush();
-          if (!safe()) return false;
-          const stopped = await ask({ type: 'desktop_input', id: input.id, owner: input.owner, conversationId: target, recoveryAction: 'stopped' });
-          if (stopped?.data?.ok !== true || !safe()) return false;
-        } finally {
-          recoveryStopping = false;
-          desktopInputBusy = false;
-        }
-      } else {
-        await ask({ type: 'desktop_input', id: message.id, conversationId: target, silenceBusyTurnId: message.silenceTurnId });
-        return false;
-      }
+      await ask({ type: 'desktop_input', id: message.id, conversationId: target, silenceBusyTurnId: message.silenceTurnId });
+      return false;
     }
     if (message.directTurn && (!target || ((generating || CLF_DOM.generating()) &&
         (!sourceUser || sourceTurn !== message.directTurn.id)))) return false;
@@ -8970,10 +8908,8 @@
       let receipt = null;
       if (!(await sendSubmittedText(sendingTarget, false, async sendCurrent => {
         // Preserve the outbox's revocable claim until the actual native Send is ready.
-        if (input.recovery && !await recoveryPageUnfinished(() => sendCurrent() && onTarget() && draft.current())) return false;
         const authorized = await ask({ type: 'desktop_input', id: input.id, owner: input.owner, conversationId: target, authorize: true });
         if (!sendCurrent() || authorized?.data?.ok !== true || !onTarget() || !draft.current()) return false;
-        if (input.recovery && !await recoveryPageUnfinished(() => sendCurrent() && onTarget() && draft.current())) return false;
         sendAttempted = true;
         return true;
       }, (user, conversation) => {

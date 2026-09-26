@@ -296,6 +296,15 @@ describe('durable user input ownership', () => {
     expect((await listInputs()).find(entry => entry.id === row.id)?.state).toBe('cancelled');
     expect(await pendingBrowserInputs()).toEqual([]);
   });
+  it('cancels a persisted legacy Automatic Continue row instead of turning it into an ordinary message', async () => {
+    const row = { ...input({ text: 'Resume unfinished work' }), state: 'queued', owner: null,
+      createdAt: now, conversationId: binding.conversationId,
+      recovery: { questionId: 'old-question', pro: false, busyUntil: now + 60_000, phase: 'ready' } };
+    await writeDurableNow('session-input', [row]); resetInputForTests();
+    const restored = (await listInputs()).find(entry => entry.id === row.id);
+    expect(restored).toMatchObject({ state: 'cancelled', error: 'Retired automatic Continue was cancelled during migration.' });
+    expect(await pendingBrowserInputs()).toEqual([]);
+  });
   it('delivers a generated finish instruction through the existing exact tool receipt once', async () => {
     binding.goalEnabled = true;
     binding.activeTurnId = 'turn-one';

@@ -17,7 +17,7 @@ import { browserWindowBounds, currentBrowserWorkArea } from './browser-window-la
 export { setBrowserWorkArea } from './browser-window-layout.js';
 import { pendingBrowserPreferenceRequest, acknowledgeBrowserPreferences } from './browser-preferences.js';
 import { sessionFinishHeld, releaseSessionFinish, sessionFinishWaiting } from './session/finish.js';
-import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, fileRecoveryInput, advanceRecoveryInput, hasQueuedAfterTurnInput, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs } from './session/input.js';
+import { pendingBrowserInputs, claimBrowserInput, acknowledgeBrowserInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, listInputs, fileSilenceInput, hasQueuedAfterTurnInput, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs } from './session/input.js';
 /**
  * The local bridge between the Chrome extension and this app.
  *
@@ -1445,12 +1445,6 @@ export async function cancelSessionCompaction(sessionId: string): Promise<Sessio
   return sessionControlsFor(sessionId);
 }
 
-/** Policy gate only: the live silence grant files the outbox's exact recovery claim. */
-export function recoveryInputAllowed(sessionId: string, id: string): boolean {
-  return getConfig().ui.autoContinue === true && !conversationBlockReason(id) &&
-    !stopRequestedFor(id) && !continuationForSession(sessionId);
-}
-
 // -------------------------------------------------------------------- routes
 
 /**
@@ -1782,10 +1776,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const target = body.conversationId === null ? null : conversationId(body.conversationId);
     if (body.conversationId !== null && !target) return json(res, 400, { error: 'bad_conversation_id' }, origin);
     if (body.recoveryAction === 'stop' || body.recoveryAction === 'stopped' || body.recoveryAction === 'reloaded') {
-      const ok = !!target && recoveryInputAllowed((await findSessionByConversation(target))?.id ?? '', target) &&
-        await advanceRecoveryInput(body.id, body.owner, target, body.recoveryAction);
-      if (ok) changed();
-      return json(res, 200, { ok }, origin);
+      // Retired Automatic Continue protocol. Old extension builds must fail closed rather
+      // than letting a recovery action fall through into an ordinary input claim.
+      return json(res, 200, { ok: false }, origin);
     }
     if (typeof body.silenceBusyTurnId === 'string') {
       const deferred = !!target && await deferSilenceInput(body.id, target, body.silenceBusyTurnId);
@@ -5014,9 +5007,7 @@ async function fileSilenceInputTicket(conversationId: string, now: number, liste
     (observationWritesInFlight === 0 || (grant.thinkingFailed === true && repair.progress?.turnId === grant.turnId));
   if (await fileSilenceInput(grant.sessionId, conversationId, grant.turnId, current,
     grant.thinkingFailed || grant.model !== 'pro' ? grant.until : listenUntil)) return true;
-  return recoveryInputAllowed(grant.sessionId, conversationId) &&
-    fileRecoveryInput(grant.sessionId, conversationId, grant.turnId, grant.model === 'pro', current,
-      (lastBrowserRecoveryAt.get(conversationId) ?? now) + recoveryBusyMs(grant.model === 'pro'), repair.progressId);
+  return false;
 }
 
 /**
@@ -5175,17 +5166,6 @@ async function sessionRecoveryCountdowns(sessionId: string, conversationId: stri
     if (pendingRepair.reason === 'no-tab' || pendingRepair.reason === 'stalled')
       return [{ kind: 'tab-recovery', deadline: pendingRepair.notBefore }];
   }
-  const recovery = rows.find(row => row.sessionId === sessionId && row.recovery &&
-    (row.state === 'queued' || row.state === 'browser') && row.silenceBoundary);
-  if (recovery?.silenceBoundary && recoveryInputAllowed(sessionId, conversationId)) {
-    const wait = recovery.silenceBoundary.listenUntil ?? 0;
-    const pickup = pickupWatch.get(conversationId);
-    result.push(wait > Date.now() || !pickup ? {
-      kind: recovery.silenceBoundary.nativeBusy ? 'native-busy' : 'post-reload',
-      deadline: wait || Date.now(), next: 'continue'
-    } : { kind: 'pickup', deadline: pickup.dueAt, visibleAt: pickup.dueAt - 30_000, next: 'continue' });
-    return result;
-  }
   if (browserPresent() && session.browserRecoveryDismissedAt === undefined) {
     const deadlines = [...unattributedIncidents.values()].flatMap(incident => {
       if (incident.pass >= 2) return [];
@@ -5214,7 +5194,7 @@ async function sessionRecoveryCountdowns(sessionId: string, conversationId: stri
   // One presentation window for active and incompletely ended turns. The work
   // owner keeps its actual deadline; native completion cannot reveal it early.
   if (owned && !confirmed &&
-      (grant.thinkingFailed || recoveryInputAllowed(sessionId, conversationId) || tabRecoveryWanted(conversationId) || queuedAfterTurn)) {
+      (grant.thinkingFailed || tabRecoveryWanted(conversationId) || queuedAfterTurn)) {
     result.push({ kind: 'silence', deadline: grant.until,
       visibleAt: grant.until - (grant.model === 'pro' ? 300_000 : 30_000) });
     return result;
@@ -5670,9 +5650,8 @@ async function noteRecoveryObservations(
   const proTerminal = terminalGrant?.model === 'pro' && (activity.endedTurnId === terminalGrant.turnId ||
     (activity.terminal && !observations.some(item => item.kind === 'turn_end')));
   const awaitingSilenceRefresh = !!lastEnd && !!sessionId &&
-    ((lastEnd === 'completed' && recoveryInputAllowed(sessionId, conversationId)) ||
-      (['stalled', 'failed', 'unknown', 'interrupted', 'error'].includes(lastEnd) &&
-        (recoveryInputAllowed(sessionId, conversationId) || await hasQueuedAfterTurnInput(sessionId))));
+    ['stalled', 'failed', 'unknown', 'interrupted', 'error'].includes(lastEnd) &&
+      await hasQueuedAfterTurnInput(sessionId);
   const mcpTerminal = !thinkingFailed && !terminalGrant?.thinkingFailed && terminalGrant?.turnId && activity.endedTurnId === terminalGrant.turnId && sessionId && activity.terminal &&
     lastEnd !== 'stopped' && await turnHasMcpCall(sessionId, conversationId, terminalGrant.turnId);
   const finalTurn = activity.endedTurnId ?? terminalGrant?.turnId;
@@ -5683,19 +5662,6 @@ async function noteRecoveryObservations(
     (item.state === 'final' || item.final === true));
   const completedFinal = (activity.terminal || observedFinal) && sessionId &&
     await readCompletedFinal(sessionId, conversationId, finalTurn);
-  // A short native generation can start and end in one accepted batch. That is
-  // still owed work when no canonical final arrived; the terminal UI flag must
-  // not prevent the same silence grant that a separately delivered start earns.
-  if (!completedFinal && !terminalGrant && sessionId && ended?.turnId && lastEnd !== 'stopped' &&
-      !thinkingFailed && activity.working && activity.terminal && activity.endedTurnId === ended.turnId &&
-      recoveryInputAllowed(sessionId, conversationId)) {
-    const [work] = await readRecentEvents(sessionId, 1, { kinds: ['user_message', 'assistant_message', 'tool_call', 'page_tool', 'turn_start'] });
-    if (work && (await getSession(sessionId))?.conversationId === conversationId && !activeUntil.has(conversationId)) {
-      grantActivity(conversationId, sessionId, Math.min(Date.now(), work.time), CHAT_SILENCE_MS,
-        { turnId: ended.turnId, model: provenModel });
-      terminalGrant = activeUntil.get(conversationId);
-    }
-  }
   // The ten-/two-minute budget is silence recovery only. Final response evidence
   // consumes it even if a local call is still draining; runningToolCalls separately
   // guards actual send/compaction. Replayed finals cannot consume newer work.
@@ -5987,7 +5953,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
       continue;
     }
     const pro = await extendedSilenceWindowFor(conversationId, grant.sessionId);
-    const afterTurn = recoveryInputAllowed(grant.sessionId, conversationId) || await hasQueuedAfterTurnInput(grant.sessionId);
+    const afterTurn = await hasQueuedAfterTurnInput(grant.sessionId);
     if (activeUntil.get(conversationId) !== grant) continue;
     if (afterTurn && runningToolCalls(conversationId) > 0) {
       grant.until = now + PICKUP_QUIET_MS;
@@ -7189,8 +7155,7 @@ function rearmRetainedCommandDeadlines(): void {
  * the tab never redeemed, or redeemed and never typed, or typed into a chat it never named
  * — and `drop()` is what makes it safe: a manual continuation is aborted and its session stays
  * where it is, or the worker slot is failed so the prime stops waiting on a chat that does
- * not exist. An automatic continuation is the deliberate exception: only its expired browser
- * transport is released, leaving the ticket for its next 15-minute pickup.
+ * not exist.
  */
 function expire(command: Command): void {
   if (!commands.includes(command)) return;
