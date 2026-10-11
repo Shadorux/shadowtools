@@ -13,7 +13,7 @@
  * the pending work, never the app's ability to start.
  */
 
-import { promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { logWarn } from './logger.js';
 
@@ -52,7 +52,20 @@ export async function readDurable<T>(name: string): Promise<T | null> {
   if (!root) return null;
   try {
     const raw = await fs.readFile(fileFor(name), 'utf8');
-    return JSON.parse(raw) as T;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      // Preserve evidence before a later successful write replaces the unreadable state.
+      // Never move the live file: another read or recovery attempt may still need it.
+      const backup = `${fileFor(name)}.corrupt-${Date.now()}-${process.pid}`;
+      try {
+        await fs.copyFile(fileFor(name), backup, fsConstants.COPYFILE_EXCL);
+        logWarn(`invalid ${name} state JSON; preserved unreadable state at ${backup}`);
+      } catch (backupError) {
+        logWarn(`invalid ${name} state JSON; recovery copy failed: ${(backupError as Error).message}`);
+      }
+      return null;
+    }
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code && code !== 'ENOENT') {

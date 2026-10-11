@@ -29,6 +29,22 @@ async function tempStore(): Promise<string> {
 }
 
 describe('durable state commit boundary', () => {
+  it('preserves corrupt state for diagnosis before a replacement commit', async () => {
+    const dir = await tempStore();
+    const stateDir = path.join(dir, 'state');
+    await fs.mkdir(stateDir, { recursive: true });
+    const file = path.join(stateDir, 'swarm.json');
+    await fs.writeFile(file, '{"unfinished":', 'utf8');
+
+    await expect(readDurable('swarm')).resolves.toBeNull();
+    const backups = (await fs.readdir(stateDir)).filter(name => name.startsWith('swarm.json.corrupt-'));
+    expect(backups).toHaveLength(1);
+    expect(await fs.readFile(path.join(stateDir, backups[0]!), 'utf8')).toBe('{"unfinished":');
+
+    await writeDurableNow('swarm', { recovered: true });
+    await expect(readDurable('swarm')).resolves.toEqual({ recovered: true });
+    expect(await fs.readFile(path.join(stateDir, backups[0]!), 'utf8')).toBe('{"unfinished":');
+  });
   it('starts independent pending files during flush without duplicating an active immediate write', async () => {
     await tempStore();
     let release!: () => void;
